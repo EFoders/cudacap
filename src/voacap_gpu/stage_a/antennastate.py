@@ -49,6 +49,9 @@ class CantennaState:
         (NFREQ + 1, NANT + 1), dtype=np.float32))
     iarray360: np.ndarray = field(default_factory=lambda: np.zeros(
         (NAZIM + 1, NELEV + 1, 3), dtype=np.int16))
+    # /pantenna/ -- transmitter power per entry, read by PWRDB
+    pwrkw: np.ndarray = field(default_factory=_a20)
+    pwrdba: np.ndarray = field(default_factory=_a20)
 
     def load_p2p(self, iat: int, ant, itr: int, fqs=0.0, fqe=30.0) -> None:
         """Install a parsed type 14 file as entry `iat`, for TX (1) or RX (2).

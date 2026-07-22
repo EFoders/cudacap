@@ -1,0 +1,8 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_regmod.f + regmod + prbmuf + gain + pwrdb
+inputs: 103 injected columns (see gen_regmod_cases.py COLUMNS)
+        /cantenna/ from antennas/samples/sample.14, TX entry 1 over
+        [txlo,txhi], RX entry 2 over 2-30 MHz
+outputs: /ZON/ 20 fields x 7 mode slots
+generated: 2026-07-22T17:50:41Z

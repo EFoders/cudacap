@@ -57,3 +57,14 @@ def sqrt32(x):
 
 def exp32(x):
     return F32(np.exp(F64(x)))
+
+
+def pow32(x, y):
+    """REAL*4 ``x**y`` with a REAL exponent — gfortran emits powf.
+
+    The exponent must already be rounded to binary32 before the binary64
+    evaluation: REGMOD's ``**1.98`` is a default-REAL literal, i.e. the
+    float32 nearest to 1.98 (1.98000001907...), not 1.98 itself.  Raising to
+    the binary64 1.98 would shift the result by far more than the libm floor.
+    """
+    return F32(np.power(F64(F32(x)), F64(F32(y))))
