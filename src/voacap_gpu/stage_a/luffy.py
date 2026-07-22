@@ -117,13 +117,13 @@ def _luffy(c, ipflag: int) -> None:
     pluf = F32(0.0)
     if ipfg > 200:
         # .....FREQUENCY COMPLEMENT, and the required reliability
-        frqcom(c.muf, c.frq.frea, 0, c.it)
+        frqcom(c.muf, c.frq.frea, 0, c.time.it)
         pluf = _PCT * F32(c.lufp)
 
     # .....SELECT CONTROLLING SAMPLE AREA
     c.frq.jmode = selmod(c.layers)
     # .....GET NOISE VALUE AT 1 MHZ FOR RCVR SITE
-    anois1(c.anois, c.iono, c.gmtr, c.rlong, c.rlongd, c.rlat)
+    anois1(c.anois, c.iono, c.time.gmtr, c.rlong, c.rlongd, c.rlat)
 
     k = _select_area(c, ipfg)                # labels 83, 84, 85
     # .....CAN RUN FOR SHORT PATHS ALSO, SO SET ALL SAMPLE AREAS
@@ -291,7 +291,7 @@ def _luf_found(c, ifx: int, pluf) -> None:
     """
     frea = c.frq.frea
     if ifx == 1:                             # 1st frequency is good
-        c.muf.xluf[c.it] = c.frq.freq
+        c.muf.xluf[c.time.it] = c.frq.freq
     else:
         # .....NO ITERATION, SELECT THE FREQUENCY COMPLEMENT FIRST
         flow = frea[ifx - 1]
@@ -299,8 +299,9 @@ def _luf_found(c, ifx: int, pluf) -> None:
         rlow = c.son.reliab[ifx - 1]
         rhigh = c.son.reliab[ifx]
         # .....USE LINEAR INTERPOLATION
-        c.muf.xluf[c.it] = flow + (fhigh - flow) * (pluf - rlow) / (rhigh - rlow)
-    frea[I_LUF] = c.muf.xluf[c.it]
+        c.muf.xluf[c.time.it] = (flow + (fhigh - flow) * (pluf - rlow)
+                                 / (rhigh - rlow))
+    frea[I_LUF] = c.muf.xluf[c.time.it]
 
 
 def _no_luf(c) -> None:
@@ -313,7 +314,7 @@ def _no_luf(c) -> None:
     for i in range(2, NFREQ + 1):            # DO 160 IF = 2,12
         if c.son.reliab[i] > rel:
             ig = i
-    c.muf.xluf[c.it] = -c.frq.frea[ig]
+    c.muf.xluf[c.time.it] = -c.frq.frea[ig]
     c.frq.frea[I_LUF] = c.frq.frea[ig]
 
 

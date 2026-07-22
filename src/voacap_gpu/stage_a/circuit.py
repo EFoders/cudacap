@@ -36,6 +36,7 @@ from .redmap import IonoState
 from .reflxstate import ReflxState
 from .signalstate import SigdState, TonState
 from .sonstate import SonState
+from .timestate import TimeState
 from .zonstate import ZonState
 
 F32 = np.float32
@@ -62,6 +63,7 @@ class Circuit:
     ton: TonState = field(default_factory=TonState)
     cant: CantennaState = field(default_factory=CantennaState)
     frq: FrqState = field(default_factory=FrqState)
+    time: TimeState = field(default_factory=TimeState)
 
     # --- /DON/ path geometry and circuit requirements ---------------------
     gcd: F32 = F32(0.0)             # great-circle distance, radians
@@ -73,6 +75,7 @@ class Circuit:
     rlat: F32 = F32(0.0)            # receiver latitude, radians
     rlong: F32 = F32(0.0)           # receiver longitude, radians
     rlongd: F32 = F32(0.0)          # ... and degrees
+    tlong: F32 = F32(0.0)           # transmitter longitude, radians
 
     # --- /ION/ ------------------------------------------------------------
     lufp: int = 90                  # required reliability, percent
@@ -82,10 +85,6 @@ class Circuit:
     # --- /CONTRL/ ---------------------------------------------------------
     mspec: int = 0                  # 121 selects long/short path smoothing
     jlong: int = -1                 # output-only; see the module docstring
-
-    # --- /TIME/ -----------------------------------------------------------
-    it: int = 1                     # hour index, 1..24
-    gmtr: F32 = F32(0.0)            # receiver mean time, hours
 
     # --- /ALPHA/ ----------------------------------------------------------
     nyear: str = ""                 # " 2089" selects the pre-1989 noise model

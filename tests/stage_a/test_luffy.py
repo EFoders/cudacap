@@ -58,7 +58,8 @@ def test_the_bands_either_side_of_the_smoothing_range_do_not():
 
 
 def test_the_luf_interpolates_between_the_bracketing_frequencies():
-    c = Circuit(it=7)
+    c = Circuit()
+    c.time.it = 7
     c.frq.frea[3] = F32(7.0)
     c.frq.frea[4] = F32(9.0)
     c.son.reliab[3] = F32(0.80)
@@ -69,7 +70,8 @@ def test_the_luf_interpolates_between_the_bracketing_frequencies():
 
 
 def test_a_first_frequency_that_works_is_the_luf_outright():
-    c = Circuit(it=7)
+    c = Circuit()
+    c.time.it = 7
     c.frq.freq = F32(3.2)
     c.frq.frea[1] = F32(3.2)
     _luf_found(c, 1, F32(0.90))
@@ -80,7 +82,8 @@ def test_no_luf_takes_the_LAST_frequency_to_beat_slot_one_not_the_best():
     """REL is seeded from RELIAB(1) and never reassigned inside the loop, so
     the scan keeps overwriting IG.  The source flags this itself, asking
     whether the test should have been RELIAB(IF).gt.RELIAB(IG)."""
-    c = Circuit(it=7)
+    c = Circuit()
+    c.time.it = 7
     for i, (f, r) in enumerate(
             [(3.2, 0.10), (5.1, 0.80), (7.3, 0.55), (9.6, 0.30)], start=1):
         c.frq.frea[i] = F32(f)
@@ -93,7 +96,8 @@ def test_no_luf_takes_the_LAST_frequency_to_beat_slot_one_not_the_best():
 
 
 def test_no_luf_with_nothing_beating_slot_one_keeps_slot_one():
-    c = Circuit(it=7)
+    c = Circuit()
+    c.time.it = 7
     for i, (f, r) in enumerate(
             [(3.2, 0.80), (5.1, 0.10), (7.3, 0.55)], start=1):
         c.frq.frea[i] = F32(f)

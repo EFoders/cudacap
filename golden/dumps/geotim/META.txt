@@ -1,0 +1,13 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_geotim.f + geotim + cngtim
+inputs: 13 injected columns (see gen_geotim_cases.py COLUMNS):
+        JT, ITIM, TLONG/RLONG (radians), KM, CLONG(1..5), and a
+        standalone CNGTIM triple (TIME, XTHETA in degrees, ISW).
+outputs: CNGTIM's rewritten TIME and its day-change return, then
+         GEOTIM's IT, GMT, GMTR, UTIME(IT), XLMT(IT), CLCK(1..5).
+NOTE: the standalone CNGTIM call is made FIRST and on its own copies,
+      so it cannot disturb the slots GEOTIM then fills.
+NOTE: GEOTIM discards every day-change CNGTIM returns -- a prediction
+      hour carries no date.  Only the direct call can observe it.
+generated: 2026-07-22T19:48:53Z
