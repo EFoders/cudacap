@@ -8,6 +8,8 @@ import numpy as np
 GOLDEN = pathlib.Path(__file__).resolve().parents[2] / "golden" / "dumps"
 COEFFS_DIR = (pathlib.Path(__file__).resolve().parents[2] / "reference"
               / "voacapl" / "voacapl" / "itshfbc" / "coeffs")
+ANTENNAS_DIR = (pathlib.Path(__file__).resolve().parents[2] / "reference"
+                / "voacapl" / "voacapl" / "itshfbc" / "antennas" / "samples")
 
 
 def load_dump(name):

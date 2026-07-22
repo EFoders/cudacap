@@ -1,0 +1,7 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_gainant.f + gain (antenna branch, ITR>=0)
+inputs: itr,delta_rad,fmc; /cantenna/ loaded from antennas/samples/sample.14
+        (the tests read the byte-identical copy under reference/)
+entries: 1=TX 2-15MHz, 2=RX 2-30MHz, 3=TX 15-30MHz (+3 dB, EFF+0.5)
+generated: 2026-07-22T17:39:47Z

@@ -1,0 +1,6 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_readant.f (readant.for READ statements, verbatim)
+inputs: antennas/samples/sample.{11,13,14} -- the tests read the same
+        files from reference/, which are byte-identical to these
+generated: 2026-07-22T17:39:46Z
