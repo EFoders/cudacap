@@ -1,0 +1,7 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero
+sources: dump_genfam.f + genfam/redmap + modules
+inputs: month,y2_rad,iblk,freq,z; REDMAP loads FAM/DUD (SSN=100 CCIR,
+        neither table is SSN-blended so only MONTH selects them)
+outputs: fa,dua,dla,dms,dus,dls
+generated: 2026-07-22T18:28:30Z

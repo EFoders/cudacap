@@ -1,0 +1,10 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero
+sources: dump_genois.f + genois/genfam/gain/redmap + modules
+inputs: month,izf,freq,noise,rlat,atnu,atny,cc,tm,kj,jk,fi3,rxlo,rxhi
+        REDMAP loads F2D/FAM/DUD (SSN=100 CCIR); IZF forces
+        F2D(1,1,1) negative for the no-data-base branch
+        /cantenna/ entry 2 = antennas/samples/sample.14 over [rxlo,rxhi]
+outputs: /ANOIS/ rcnse,du,dl,sigm,sygu,sygl; /TON/ gnos,xnoise,znoise;
+         /ZON/ eff x 7; the /c_noise*/ breakdown + method_used
+generated: 2026-07-22T18:28:35Z
