@@ -1,0 +1,12 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_relbil.f + relbil + fnorml + pwrdb + blkdat
+inputs: 313 injected columns (see gen_relbil_cases.py COLUMNS):
+        14 scalars + 15 /allMODE/ arrays x 20 slots
+        D10R/D50R/D90R are seeded as well as dumped -- they live in
+        /DON/, persist across calls, and RELBIL does not always
+        assign them
+outputs: /allMODE/ CREL+RELY x 20, NREL, the D*R triple, /SON/ +
+         /DUDL_NOIS/ + /sncom/ + /cgains/ at column IFX, the /SIGD/
+         DSLF/DSUF scratch, and MODE(IFX) as its 1..5 LAYTYP index
+generated: 2026-07-22T18:49:45Z
