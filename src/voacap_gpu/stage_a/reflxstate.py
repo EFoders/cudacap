@@ -49,3 +49,7 @@ class ReflxState:
     # DELPEN(3,5): [layer 1..3][area 1..5]
     delpen: np.ndarray = field(
         default_factory=lambda: np.zeros((4, 6), dtype=np.float32))
+    # IAFTXR (really /LOSX/): the ray count FINDF found for each area, 1-based
+    # (4,) -- co-located here with the ray table it indexes.
+    iaftxr: np.ndarray = field(
+        default_factory=lambda: np.zeros(4, dtype=np.int32))
