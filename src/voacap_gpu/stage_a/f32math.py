@@ -34,3 +34,21 @@ def acos32(x):
 
 def atan32(x):
     return F32(np.arctan(F64(x)))
+
+
+def asin32(x):
+    return F32(np.arcsin(F64(x)))
+
+
+def log32(x):
+    """REAL*4 ALOG (natural log)."""
+    return F32(np.log(F64(x)))
+
+
+def sqrt32(x):
+    """REAL*4 SQRT — correctly rounded in numpy and gfortran alike."""
+    return F32(np.sqrt(F64(x)))
+
+
+def exp32(x):
+    return F32(np.exp(F64(x)))
