@@ -1,0 +1,5 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_gain.f + gain (ground-reflection branch only)
+inputs: ig,sigma,er,delta_rad,fmc injected into /GEOG/ SIGPAT/EPSPAT
+generated: 2026-07-22T17:11:42Z
