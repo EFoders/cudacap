@@ -7,7 +7,7 @@ at the end of the frequency list, and where the port refuses.
 
 The composed behaviour is a separate exercise: it needs the whole upstream
 state at LUFFY's entry, which is an end-to-end replay rather than a tier-B
-dump.
+dump.  That lives in test_luffy_replay.py.
 """
 
 import numpy as np

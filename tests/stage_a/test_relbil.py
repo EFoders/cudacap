@@ -234,13 +234,16 @@ def test_stale_deciles_survive_a_dead_only_mode():
 
 
 def test_no_modes_returns_untouched():
+    """NREL keeps whatever it held -- and before the first successful call
+    that is the BLOCK DATA 1 (blkdat.for:181), not 0.  MPATH and SERPRB index
+    /allMODE/ with it either way, so slot 1 rather than the padded slot 0."""
     allm = AllModeState()
     allm.nmmod = 0
     allm.crel[1] = SENTINEL
     son = SonState(d10r=F32(1.0))
     relbil(allm, AnoisState(), SigdState(), son, CantennaState(),
            3, F32(14.0), F32(24.0), 90)
-    assert allm.crel[1] == SENTINEL and allm.nrel == 0
+    assert allm.crel[1] == SENTINEL and allm.nrel == 1
     assert son.reliab[3] == 0.0 and son.mode[3] == ""
 
 
