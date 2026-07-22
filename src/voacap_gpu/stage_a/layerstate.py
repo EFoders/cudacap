@@ -57,6 +57,13 @@ class LayerState:
     yi: np.ndarray = field(default_factory=lambda: _f2((4, 6)))
     hi: np.ndarray = field(default_factory=lambda: _f2((4, 6)))
 
+    # /RON/ ionogram (GENION output), 1-based (31,6): [freq 1..30][area 1..5]
+    # FVERT vertical-sounding freq (MHz), HPRIM virtual height, HTRUE true
+    # height (km).
+    fvert: np.ndarray = field(default_factory=lambda: _f2((31, 6)))
+    hprim: np.ndarray = field(default_factory=lambda: _f2((31, 6)))
+    htrue: np.ndarray = field(default_factory=lambda: _f2((31, 6)))
+
     # /ES/ sporadic-E, 1-based
     fs: np.ndarray = field(default_factory=lambda: _f2((4, 6)))
     hs: np.ndarray = field(default_factory=lambda: _f2(6))
