@@ -51,6 +51,8 @@ class LayerState:
     glat: np.ndarray = field(default_factory=lambda: _f2(6))
     gmdip: np.ndarray = field(default_factory=lambda: _f2(6))
     gyz: np.ndarray = field(default_factory=lambda: _f2(6))
+    # /RON/ RD = sample-area ground distance from transmitter (km), 1-based (6,)
+    rd: np.ndarray = field(default_factory=lambda: _f2(6))
 
     # /RON/ layer parameters, 1-based (4,6): [layer 1..3][area 1..5]
     fi: np.ndarray = field(default_factory=lambda: _f2((4, 6)))
@@ -88,6 +90,11 @@ class LayerState:
     rat: np.ndarray = field(default_factory=lambda: _f2(6))
     clck: np.ndarray = field(default_factory=lambda: _f2(6))
     abiy: np.ndarray = field(default_factory=lambda: _f2(6))
+    # /GEOG/ ARTIC arctic-path flag; SIGPAT/EPSPAT sample-area ground
+    # conductivity/permittivity, 1-based (6,)
+    artic: np.ndarray = field(default_factory=lambda: _f2(6))
+    sigpat: np.ndarray = field(default_factory=lambda: _f2(6))
+    epspat: np.ndarray = field(default_factory=lambda: _f2(6))
 
     # /PSCA/ critical-frequency multipliers, 1-based (5,): E,F1,F2,Es
     psc: np.ndarray = field(

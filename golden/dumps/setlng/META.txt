@@ -1,0 +1,5 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_setlng.f + setlng
+inputs: kfx,salt -> distinct exact-int sentinels in areas 1..5
+generated: 2026-07-22T12:57:09Z
