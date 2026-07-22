@@ -1,0 +1,9 @@
+Pinned oracle output for tests/p2p/test01.dat (exact bytes as written by the
+WSL-built voacapl oracle). Any future oracle rebuild must reproduce this
+byte-identically, or the toolchain drift must be investigated and this
+fixture consciously re-pinned.
+
+voacapl source: reference/voacapl @ c12a98b348c39f36f2659b8b3aa97b86284c8a1d
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch
+built: 2026-07-22T00:54:38Z
