@@ -1,0 +1,10 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_serprb.f + serprb + mpath + fnorml
+inputs: 158 injected columns (see gen_serprb_cases.py COLUMNS):
+        18 scalars + 7 /allMODE/ arrays x 20 slots.  NREL is injected
+        rather than produced, so neither routine depends on RELBIL.
+outputs: /allMODE/ SPRO x 20, /SON/ SPROB+PROBMP at IFX, the /DON/
+         D10S/D50S/D90S triple, /TON/ SPR
+NOTE: NMMOD is never 0 -- SERPRB reads uninitialised locals there
+generated: 2026-07-22T18:58:08Z

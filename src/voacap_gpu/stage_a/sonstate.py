@@ -14,13 +14,15 @@ Bundled here because they are filled together and by the same routines:
     /cgains/      GAINT, GAINR -- the chosen mode's antenna gains
     /ALPHA/ MODE  the two-character layer label, from LAYTYP
 
-D10R/D50R/D90R are a **deviation**: in the Fortran they live in /DON/ among
-the path geometry, but only RELBIL writes them and only RELBIL and OUTALL's
-diagnostic read them, so they are kept here with the outputs they feed rather
-than dragging the whole of /DON/ into a state object.  They persist across
-calls, and that is observable: when the only mode has a virtual height at or
-below 70 km, RELBIL never assigns them and SNRLW/SNRUP/SNPR read whatever the
-previous frequency left.  Faithfully preserved.
+The two decile triples are a **deviation**: in the Fortran D10R/D50R/D90R and
+D10S/D50S/D90S live in /DON/ among the path geometry, but the R triple is
+written only by RELBIL and the S triple only by SERPRB, and the only other
+reader of either is OUTALL's diagnostic line.  They are kept here with the
+outputs they feed rather than dragging the whole of /DON/ into a state
+object.  They persist across calls, and for the R triple that is observable:
+when the only mode has a virtual height at or below 70 km, RELBIL never
+assigns them and SNRLW/SNRUP/SNPR read whatever the previous frequency left.
+Faithfully preserved.
 
 MDL, ANGLER, PROBMP and SPROB are filled by other routines (MPATH, SERPRB);
 carried here for layout completeness.
@@ -83,7 +85,12 @@ class SonState:
     # /cgains/
     gaint: np.ndarray = field(default_factory=_z)
     gainr: np.ndarray = field(default_factory=_z)
-    # /DON/ -- see the module docstring; these PERSIST across calls
+    # /DON/ -- see the module docstring; these PERSIST across calls.
+    # The R triple is RELBIL's reliability spread, the S triple SERPRB's
+    # service-probability spread (where D90S is simply set equal to D10S).
     d10r: F32 = F32(0.0)
     d50r: F32 = F32(0.0)
     d90r: F32 = F32(0.0)
+    d10s: F32 = F32(0.0)
+    d50s: F32 = F32(0.0)
+    d90s: F32 = F32(0.0)
