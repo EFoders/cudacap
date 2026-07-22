@@ -59,10 +59,11 @@ class LayerState:
 
     # /RON/ ionogram (GENION output), 1-based (31,6): [freq 1..30][area 1..5]
     # FVERT vertical-sounding freq (MHz), HPRIM virtual height, HTRUE true
-    # height (km).
+    # height (km).  AFAC = deviative-loss factor (ALOSFV output).
     fvert: np.ndarray = field(default_factory=lambda: _f2((31, 6)))
     hprim: np.ndarray = field(default_factory=lambda: _f2((31, 6)))
     htrue: np.ndarray = field(default_factory=lambda: _f2((31, 6)))
+    afac: np.ndarray = field(default_factory=lambda: _f2((31, 6)))
 
     # /ES/ sporadic-E, 1-based
     fs: np.ndarray = field(default_factory=lambda: _f2((4, 6)))

@@ -1,0 +1,5 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_alosfv.f + alosfv/genion/lecden/gethp/bendy/pen/xlin
+inputs: controlled FI/YI/HI + IEDP + injected HPMUF/HTMUF
+generated: 2026-07-22T04:36:45Z
