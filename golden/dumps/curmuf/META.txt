@@ -1,0 +1,5 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero
+sources: dump_curmuf.f + curmuf(orig)/lecden/gethp/bendy/pen/f2dis/redmap + modules
+inputs: controlled FI/YI/HI/FS + path geometry; REDMAP loads F2D
+generated: 2026-07-22T03:12:59Z
