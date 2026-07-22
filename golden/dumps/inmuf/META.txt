@@ -1,0 +1,10 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_inmuf.f + inmuf + regmod + prbmuf + gain + pwrdb + xlin
+         + genion + lecden + gethp + bendy + pen
+inputs: 126 injected columns (see gen_inmuf_cases.py COLUMNS)
+        plus the post-chain FVERT/HPRIM/HTRUE/AFAC ionogram AND the
+        post-chain FI/HI (LECDEN+GENION adjust them), the FIRST
+        126 columns of expected.csv -- injected INPUTS, not results
+outputs: nummod, ghop, /MODES/ 6x6, /MUFS/ 5x4, /ZON/ 20x7
+generated: 2026-07-22T18:05:31Z
