@@ -273,15 +273,21 @@ Bottom-up by dependency, so each stage only depends on already-validated code.
 
 ## 8. Immediate next steps once you approve
 
-1. `git init`, vendor `reference/` as-is, add `.gitignore`.
-2. WSL: install gfortran, build `voacapl`, reproduce `test01.out` from
-   `test01.dat` exactly — the first real checkpoint.
-3. Write the golden-deck matrix generator + oracle-run archiver.
-4. Scaffold the Python package (src layout, pytest, PyTorch CUDA build).
-5. Document the CCIR/URSI coefficient layout from voacapl's ASCII sources and
-   converter programs (`coeffbin.f` etc.); write the ingestion script (Module 0).
-6. Write up the complete per-file precision map — grep every `REAL*8` /
-   `DOUBLE PRECISION` / `IMPLICIT DOUBLE PRECISION` occurrence across all ~188
-   source files (Section 0 spot-checked the ones found so far; this makes it
-   a complete, checked-in reference instead of a planning-time sample).
-7. Begin Module 1 (math/geometry utils) — Stage A, then Stage B.
+All original items 1–7 are DONE as of 2026-07-22: repo + oracle + golden
+matrix (99 decks) + scaffold + Module 0 ingestion (bit-exact vs oracle
+binaries, docs/coeff_format.md) + precision map + Module 1 (DAZEL Stage
+A+B 100% bit-exact; DISTXY/SANG/MAGVAR/MAGFIN/GEOM Stage A validated
+against tier-B dumps; `cang.for` skipped — it belongs to the separate
+hfmufesw tool, not the voacapl P2P binary).
+
+Next up (module table order, Section 5):
+
+1. Module 2 — ionospheric parameter maps (highest risk): trace how
+   voacapw consumes the /ccir/ arrays (GENION/F2VAR etc.), port the
+   spherical-harmonic map evaluation Stage A with tier-B dumps.
+2. Stage B (PyTorch) for the float32 Module-1 group once its consumers
+   exist (GEOM/MAGVAR batching is mechanical; DAZEL Stage B is the
+   template).
+3. Module 3 — MUF/FOT (method-9 golden decks in golden/p2p/matrix are
+   the early end-to-end targets).
+4. Modules 4+ per the Section 5 table.
