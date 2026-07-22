@@ -1,0 +1,5 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_selmod.f + selmod
+inputs: kfx,fi11,fi12,fi13,fi31,fi33
+generated: 2026-07-22T13:30:27Z
