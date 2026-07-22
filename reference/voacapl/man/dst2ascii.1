@@ -1,0 +1,48 @@
+.\" Process this file with
+.\" groff -man -Tascii voacapl.man
+.\"
+.TH VOACAPL 1 "SEO 2013" Linux "User Manuals"
+.SH NAME
+dst2ascii \- Convert DST record files to CSV
+.SH SYNOPSIS
+.B dst2ascii
+.br
+.B dst2ascii
+.B dst_directory
+.br
+.SH DESCRIPTION
+This is a small utility to convert the binary record file produced when performing
+distance calculations to an ASCII file for further analysis.
+.br
+Distance calculations are triggered by performing by using the filenames
+voacapd.dat and voacapd.out for voacap input/output files. e.g.
+.br
+voacapl ~/itshfbc voacapd.dat voacapd.output
+.br
+.SH OPTIONS
+.IP dst_directory
+The location of the .dst file and corresponding .idx file.  The output ASCII file
+is saved in this directory.  If this parameter is not specified, the current
+working directory will be used.
+.SH EXAMPLES
+dst2ascii
+.br
+Creates an ASCII file (voacapd.asc) using the values found in the voacap.dst and
+voacapd.idx files located in the current working directory.
+.br
+dst2ascii my_directory
+.br
+Creates an ASCII file (my_directory/voacapd.asc) using the values found in
+the voacap.dst and voacapd.idx files located in the directory 'my_directory'.
+
+.SH FILES
+.I voacapd.dst voacapd.idx
+.RS
+dst2ascii requires access to the .dst and corresponding index (.idx) files to run.
+
+.SH ENVIRONMENT
+dst2ascii does not make use of any environment variables.
+.SH AUTHOR
+James Watson <jimwatson at mac dot com>.
+.SH "SEE ALSO"
+www.voacap.com
