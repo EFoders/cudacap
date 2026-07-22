@@ -1,0 +1,14 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_frqcom.f + frqcom + setluf
+inputs: 31 injected columns (see gen_frqcom_cases.py COLUMNS):
+        IT, IFREQ, the five /MUFS/ slots at IT, LUFP, FREL(1..11),
+        a seed for FREL(13) and RELIAB(1..11).
+outputs: QFREL(1..13) -- FREL as FRQCOM left it, slot 13 included so
+         the case-1 arm can be seen NOT zeroing it -- then SETLUF's
+         XLUF(IT) and FREL(13).
+NOTE: case 3 is filtered to NE <= 10.  Beyond that the Fortran writes
+      FREA(NE+1) past the end of the common block; the port raises.
+NOTE: FRQCOM case 6 is unreachable -- its guard is (FHIGH-2.)-FLOW
+      with both DATA constants, i.e. the constant 36.
+generated: 2026-07-22T19:28:31Z
