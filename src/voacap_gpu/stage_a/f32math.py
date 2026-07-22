@@ -45,6 +45,11 @@ def log32(x):
     return F32(np.log(F64(x)))
 
 
+def log10_32(x):
+    """REAL*4 ALOG10 (base-10 log)."""
+    return F32(np.log10(F64(x)))
+
+
 def sqrt32(x):
     """REAL*4 SQRT — correctly rounded in numpy and gfortran alike."""
     return F32(np.sqrt(F64(x)))

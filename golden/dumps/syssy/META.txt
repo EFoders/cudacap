@@ -1,0 +1,5 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero
+sources: dump_syssy.f + syssy/redmap + modules
+inputs: month,g_rad,pt,nn,izf; REDMAP loads SYS/PERR (SSN=100 CCIR)
+generated: 2026-07-22T13:12:04Z
