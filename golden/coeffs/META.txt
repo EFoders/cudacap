@@ -1,0 +1,24 @@
+Oracle-generated coefficient binaries (gfortran unformatted).
+Produced by voacapl's coeffbin/fof2bin converters from the vendored
+ASCII sources in reference/voacapl/voacapl/itshfbc/coeffs/.
+Layout: docs/coeff_format.md.  Regenerate: build_oracle.sh, then this script.
+
+generated: 2026-07-22T01:20:09Z
+gfortran: GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+uname: Linux 6.6.87.2-microsoft-standard-WSL2 x86_64
+
+ac032273a96d3c6d70b9df85162d8b59519a8b2a653349062509b68ce51067fc  coeff01.bin
+c9fc358e9870299fc2ab7f1bc5151c15f0f2e98e94a7e1895abba67d48059a57  coeff02.bin
+1993d8d6fd42cefba4cd5d2bb6a7c5df28f29551b0cbb4dd8002d0e5ff023070  coeff03.bin
+c65322e7302a7b52015233ea05e39c88f0e6efddade679a25926d3b8609710d3  coeff04.bin
+165d025bcd7345de6b954c3eeacb5aa5aadffcf02105b4dbbb15ba64f992818f  coeff05.bin
+5f8b6439b5e0db94437817da06895cbe45cefa346461d4b9d3db8a9749d9aa85  coeff06.bin
+5b69867018897ed9be26ec48615174cfd0c76dc8927d5ebc868273537a7b0da3  coeff07.bin
+104ea8c5707f281afceec169d08bf4b804fdbbba8b2b44cdae1b63a350ec2e60  coeff08.bin
+97ea78f802896bd033c0b563c11cc550b304c498a8689d351e824e5033db9801  coeff09.bin
+7a7557c1c8100c2842c8c30dd83844d80ea958cf4cd080ccbbe56eadbfb91abc  coeff10.bin
+144e0e4fbdeff474ce1feb65fffebe48b639435c99db939421814a1c9a4354ab  coeff11.bin
+b78e44b1b13c557f7f43d48d48a24a13a6f05388a81647890857ff632d1e4d7c  coeff12.bin
+bd78d04018c07996b0427b2da60b5a95471f74c832862fed93ebddee10437f7f  fof2CCIR.da
+258f2cbcef3bc2c7068be5b21c292a8c32c5def4368ad14acb0940a5b30b2f5f  fof2URSI.da
+424e03be24e37f9353ba3e03e06df52cc15c8c7f5448d58ce847fccba3a671ae  fof2daly.bin
