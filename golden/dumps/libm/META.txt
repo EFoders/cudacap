@@ -1,0 +1,4 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+libm.so.6
+flags: -g -O2 -std=legacy -fallow-argument-mismatch
+generated: 2026-07-22T02:12:41Z

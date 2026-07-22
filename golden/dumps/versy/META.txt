@@ -1,0 +1,5 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero
+sources: dump_versy.f reference/voacapl/src/voacapw/redmap.for reference/voacapl/src/voacapw/virtim.for reference/voacapl/src/voacapw/versy.for + modules
+coeffs: $HOME/itshfbc/coeffs (w-twins; byte-identical to golden/coeffs)
+generated: 2026-07-22T01:55:17Z
