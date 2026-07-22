@@ -1,9 +1,17 @@
 """COMMON /ZON/ -- the per-mode results table for one frequency and hop.
 
-Seven slots.  REGMOD fills 1..6 from the regular modes /MODES/ found by FDIST;
-slot 7 is left at its preset for the sporadic-E mode that ESMOD adds later.
-An unused slot is marked by a NEGATIVE HN/HP (REGMOD presets both to -1 before
-deciding whether the mode exists), the same convention /MODES/ uses.
+Seven slots, written by three routines that overlap:
+
+    REGMOD  1..6   the regular modes /MODES/ found by FDIST (7 gets only its
+                   HN/HP = -1 preset)
+    ESMOD   4..5   the sporadic-E modes, OVERWRITING whatever REGMOD left --
+                   at most two Es hops exist, and they take the slots
+    ESREG   6..7   presets only; its mixed Es-F code is dead (see esreg.py)
+
+So slot 7 never carries a mode at all, and slots 4-5 carry an Es mode when
+one exists and a regular mode otherwise.  An unused slot is marked by a
+NEGATIVE HN/HP (each routine presets both to -1 before deciding whether the
+mode exists), the same convention /MODES/ uses.
 
 The fields split into the loss budget that builds TLOSS --
 
@@ -16,7 +24,9 @@ upper deciles despite the names, PROB is MUFday), and the delivered signal
 (FLDST field strength, SIGPOW signal power, SN signal-to-noise).  B is the
 radiation angle, NMODE the reflecting layer, TIMED the path delay.
 
-CREL, RELY and SPRO are filled downstream by RELBIL, not by REGMOD.
+CREL, RELY and SPRO carry reliability and are filled downstream by RELBIL.
+REGMOD never touches them; ESMOD and ESREG only preset them to markers, and
+disagree on CREL's -- -1000 for the Es slots, +1000 for ESREG's.
 
 Stored 1-based as (8,).
 """

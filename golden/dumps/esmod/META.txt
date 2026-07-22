@@ -1,0 +1,10 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_esmod.f + esmod + esreg + prbmuf + gain + pwrdb
+inputs: 63 injected columns (see gen_esmod_cases.py COLUMNS)
+        /cantenna/ from antennas/samples/sample.14, TX entry 1 over
+        [txlo,txhi], RX entry 2 over [rxlo,rxhi]
+outputs: /ZON/ 23 fields x slots 4..7, after ESMOD then ESREG
+NOTE: all 7 slots are preset to 12345. (NMODE -9) before the calls,
+      so an unwritten field is visibly untouched rather than zero
+generated: 2026-07-22T18:39:16Z
