@@ -1,0 +1,21 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_lngpat.f + lngpat + babs + tabs + convh + gettop
+         + prbmuf + pwrdb   (all callees linked real, not stubbed)
+inputs: 65 columns (see gen_lngpat_cases.py COLUMNS) — 6 integers
+        plus the two chosen rays' geometry and losses, the /MUFS/
+        four-layer distributions, the GETTOP E layer, and the loose
+        scalars.  Only two slots of each (45,3) table are touched, so
+        two values per table are injected rather than whole arrays;
+        they cannot collide because ITXRCP(2) is never 1.
+outputs: /allMODE/ NMMOD + slot 1 of twenty arrays + slot 2's B and
+         NMODE + PROB(1), and /SIGD/ DSLF/DSUF, which LNGPAT clobbers
+NOTE: every output is preset to a distinctive sentinel (-8888, -4444,
+      -3333, -2222) so the LTXRGM <= 0 early return is visible as
+      untouched rather than as a written zero.
+NOTE: held out of the grid — NMODE outside 1..4 (indexes YMUF off the
+      end of a four-element array; the port raises), HPFLX <= 0
+      (SQRT of a negative), GDFLX == 0 (divide by zero in HN/FHOP),
+      and YMUF/YFOT/YHPF <= 0 (PRBMUF's step branch can return 0 and
+      make -10*ALOG10(P) infinite).
+generated: 2026-07-22T20:46:30Z
