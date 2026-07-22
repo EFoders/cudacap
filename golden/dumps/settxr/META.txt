@@ -1,0 +1,25 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_settxr.f + cversn + settxr + gain + prbmuf
+inputs: 83 columns (see gen_settxr_cases.py COLUMNS).  The /REFLX/
+        ray tables are generated from an injected BASE and STEP per
+        column per control area over NFILL rays, the rest zeroed;
+        every ray column is a threshold input somewhere, so a ramp
+        that crosses the threshold puts rays on both sides of it.
+        /cantenna/ from antennas/samples/sample.14, TX entry 1 over
+        [txlo,txhi], RX entry 2 over [rxlo,rxhi].
+outputs: 523 columns — ANDVX/ADVX/AOFX/GRLOSX/TGAINX x 45 rays x 2
+         control areas, EFFlp x 45, ray 1 of the six /REFLX/ columns
+         plus IMODE at both areas (the over-the-MUF fallback
+         OVERWRITES it), GML/FHP at rays 1/23/45, and PROB(1..2)
+NOTE: AOFX is preset to -8888 and SETTXR is expected NOT to reset it.
+      TGAINX/ANDVX/ADVX/GRLOSX are preset to -7777 and it does reset
+      all four at the top of every ray, so a dead ray shows their
+      presets and AOFX's SENTINEL side by side.
+NOTE: held out of the grid — MODMUF outside 1..4 (indexes DELMUF and
+      YMUF off the end; the port raises), GDFLX == 0 (divide by zero
+      in the hop count), HTFLX <= 0 (SQRT of a negative, and also the
+      only route to CPHET's 1e-8 floor, which is therefore
+      unreachable for a live ray), FI(1,K) == 0, HS(K) == 0,
+      HNU == 0, XVE <= 0 and YMUF <= 0.
+generated: 2026-07-22T21:01:49Z
