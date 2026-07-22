@@ -1,0 +1,7 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_allmodes.f + allmodes
+inputs: iflg,fval + /ZON/ 23 fields x 7 (see gen_allmodes_cases.py)
+outputs: /allMODE/ 23 arrays x 20, /ZON/ HP x 7, nmmod, freq
+NOTE: records are a CALL SEQUENCE -- /allMODE/ carries across them
+generated: 2026-07-22T18:11:29Z
