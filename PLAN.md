@@ -46,6 +46,18 @@ meaningful bar is:
   tighter than anything that could ever show up in the printed output, so this
   is belt-and-suspenders, not the actual pass/fail gate.
 
+**Empirical confirmation (2026-07-21):** the upstream `tests/p2p/test01.out`
+fixture turns out to have been generated on Windows by a different compiler
+lineage (backslash antenna paths inside the output text give it away). Our
+gfortran 15 oracle build matches it except for ±1 in the last printed digit
+in roughly 1% of numeric cells — exactly the cross-compiler REAL*4 rounding
+signature predicted above, observed before a single line was ported. The
+project therefore pins its own oracle outputs (under `golden/`, with the
+toolchain recorded in `META.txt`) as the byte-exact bar; the upstream fixture
+is advisory only, and `tools/oracle/build_oracle.sh` enforces exactly this:
+determinism check, byte-exact match against the pinned fixture, advisory
+diff against upstream.
+
 ### Precision strategy: mirror the Fortran, don't blanket-upgrade
 
 You asked whether 32 bits will be enough precision. Short answer: **yes — and

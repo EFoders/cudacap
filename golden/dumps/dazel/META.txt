@@ -1,0 +1,4 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch
+source: reference/voacapl/src/voacapw/dazel.for
+generated: 2026-07-22T01:03:12Z
