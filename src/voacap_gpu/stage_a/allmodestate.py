@@ -5,6 +5,12 @@ one it finds into these 20-slot arrays, so the allmodes output method can
 report the full set for a frequency rather than one hop's worth.
 
 NMMOD is the running count and the write cursor.  NREL is filled downstream.
+Both start at **1, not 0** -- ``blkdat.for:181  DATA NMMOD/1/, NREL/1/`` --
+and that is observable: RELBIL returns without assigning NREL when NMMOD is
+non-positive, so MPATH and SERPRB then index the arrays with whatever NREL
+held.  Before the first successful RELBIL that is the BLOCK DATA 1, i.e. slot
+1, not the out-of-range slot 0.  The LUFFY replay caught the difference at the
+first call of the first hour.
 
 Stored 1-based as (21,).  The Fortran arrays are dimension 20 with no bound
 check, and NMMOD accumulates across calls -- see :func:`~voacap_gpu.stage_a.
@@ -55,5 +61,5 @@ class AllModeState:
     eff: np.ndarray = field(default_factory=_z)
     nmode: np.ndarray = field(
         default_factory=lambda: np.zeros(NSLOT + 1, dtype=np.int32))
-    nrel: int = 0
-    nmmod: int = 0
+    nrel: int = 1               # blkdat.for:181 -- DATA NREL/1/
+    nmmod: int = 1              # ... and NMMOD/1/, see the module docstring

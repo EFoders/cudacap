@@ -104,6 +104,7 @@ def test_reset_clears_to_the_no_mode_markers():
     zon = ZonState()
     for i in range(1, 8):
         zon.hp[i] = np.float32(300.0)
+    allmodes(zon, allm, 0, 0.0)         # NMMOD starts at 1 (blkdat.for:181)
     allmodes(zon, allm, 3)
     assert allm.nmmod == 6
     assert allmodes(zon, allm, 0, 21.5) == np.float32(21.5)
@@ -120,6 +121,7 @@ def test_overflow_is_refused_not_wrapped():
     zon = ZonState()
     for i in range(1, 8):
         zon.hp[i] = np.float32(300.0)
+    allmodes(zon, allm, 0, 0.0)         # NMMOD starts at 1 (blkdat.for:181)
     for _ in range(3):
         allmodes(zon, allm, 3)          # 6 each -> 18
     assert allm.nmmod == 18
