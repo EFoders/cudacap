@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Generated data caches (rebuilt from reference/ ASCII sources)
+data/cache/
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

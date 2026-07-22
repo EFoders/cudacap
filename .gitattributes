@@ -1,0 +1,4 @@
+# Byte fidelity everywhere: never normalize line endings.
+# The oracle comparison harness depends on golden fixtures and vendored
+# reference files round-tripping through git exactly as generated.
+* -text
