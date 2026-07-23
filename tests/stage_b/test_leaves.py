@@ -231,9 +231,30 @@ def test_gain_refuses_the_index_the_fortran_reads_out_of_bounds(device):
     ok = torch.tensor([0.1, 0.2], device=device)
     fmc = torch.tensor([10.0, 12.0], device=device)
     antenna_gain_batch(cant, 1, ok, fmc)                    # baseline: fine
-    with pytest.raises(IndexError, match="below the table"):
+    with pytest.raises(IndexError, match="outside the table"):
         antenna_gain_batch(cant, 1, torch.tensor([0.1, -0.5], device=device),
                            fmc)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_a_lane_no_antenna_covers_is_zero_rather_than_a_crash(device):
+    """The batched early return is a select AFTER the fact, so the gather has
+    to survive lanes it is going to discard.
+
+    The scalar routine returns 0 dB on `iat == 0` before it computes an index
+    at all, so it never sees this.  Batched, a lane at 55 MHz -- which GENOIS
+    genuinely asks for, and which no honest antenna entry covers -- still has
+    its frequency index computed, and 55 indexes ARRAY(30,...) off the end.
+    Clamping the DISCARDED lanes is the fix; the matched ones still raise.
+    """
+    cant = BatchedCantenna.from_stage_a(_cantenna(), device)
+    fmc = torch.tensor([10.0, 55.0, 31.0, 0.5], device=device)
+    delta = torch.tensor([0.2, 0.2, 0.2, 0.2], device=device)
+    rain, eff = antenna_gain_batch(cant, 1, delta, fmc)
+    assert float(rain[0]) != 0.0, "the in-band lane should still have gain"
+    assert list(rain[1:].cpu().numpy()) == [0.0, 0.0, 0.0], (
+        "lanes no entry covers must read as GAIN's preset 0 dB")
+    assert list(eff[1:].cpu().numpy()) == [0.0, 0.0, 0.0]
 
 
 # -------------------------------------------------------------------- PWRDB

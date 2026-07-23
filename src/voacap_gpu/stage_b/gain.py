@@ -142,23 +142,31 @@ def antenna_gain_batch(cant, itr, delta, fmc):
     i = torch.trunc(fmc).to(torch.long)      # REAL->INT truncates toward zero
     deltd = delta * _k(R2D, fmc)
     j = torch.trunc(deltd + _k(1.0, fmc)).to(torch.long).clamp(max=NELEV)
-    if bool((matched & ((i < 1) | (j < 1))).any()):
-        bad = matched & ((i < 1) | (j < 1))
-        n = int(bad.sum())
+    # I is NOT clamped at the top either -- only IP1 gets MIN0(30,..) -- so an
+    # entry whose XFQE reaches past 30 MHz would read past the table the same
+    # way a negative index reads before it.  Same policy, same refusal.
+    bad = matched & ((i < 1) | (j < 1) | (i > NFREQ))
+    if bool(bad.any()):
         raise IndexError(
-            f"GAIN index below the table on {n} lane(s): the Fortran reads "
-            "out of bounds here and picks up the next antenna's pattern.  "
-            f"Worst I={int(i[bad].min())}, J={int(j[bad].min())}; both must "
-            "be >= 1, so honour XFQS/XFQE and pass a non-negative elevation")
-    ip1 = (i + 1).clamp(max=NFREQ)
-    jp1 = (j + 1).clamp(max=NELEV)
+            f"GAIN index outside the table on {int(bad.sum())} lane(s): the "
+            "Fortran reads out of bounds here and picks up a neighbouring "
+            f"antenna's pattern.  I in [{int(i[bad].min())}, "
+            f"{int(i[bad].max())}], J in [{int(j[bad].min())}, "
+            f"{int(j[bad].max())}]; need 1 <= I <= {NFREQ} and J >= 1, so "
+            "honour XFQS/XFQE and pass a non-negative elevation")
     xfmc = fmc - i.to(_F32)
     xdelta = deltd - (j - 1).to(_F32)
 
-    # a lane with no matching entry indexes row 0, which is the padding row,
-    # and its answer is discarded below -- so the gathers stay unconditional
-    iz, jz = i.clamp(min=0), j.clamp(min=0)
-    ip1, jp1 = ip1.clamp(min=0), jp1.clamp(min=0)
+    # UNMATCHED LANES STILL GET GATHERED, so their indices have to be made
+    # safe -- and they are genuinely out of range, because FMC is whatever the
+    # caller asked for on a lane no antenna covers (GENOIS reaches 55 MHz).
+    # The scalar routine never sees this: it returns 0 dB on `iat == 0` BEFORE
+    # computing an index at all.  Batched, the early return becomes a select
+    # after the fact, so the gather has to survive the lanes it will discard.
+    iz = torch.where(matched, i, torch.zeros_like(i)).clamp(0, NFREQ)
+    jz = torch.where(matched, j, torch.zeros_like(j)).clamp(0, NELEV)
+    ip1 = (iz + 1).clamp(max=NFREQ)
+    jp1 = (jz + 1).clamp(max=NELEV)
     xx = cant.array[iz, jz, iat]
     yx = cant.array[ip1, jz, iat]
     xy = cant.array[iz, jp1, iat]
