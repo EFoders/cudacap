@@ -163,9 +163,16 @@ def _cantenna(txlo, txhi, pwrdba, device):
     return cant
 
 
-def _batch(device="cpu"):
-    """The whole dump as one batch, every column injected."""
-    _, inputs, rows = DUMP
+def _batch(device="cpu", inputs=None):
+    """The whole dump as one batch, every column injected.
+
+    `inputs` overrides the case rows, which is how test_inmuf.py reuses this
+    builder: INMUF's dump has REGMOD's columns as its own leading block, so
+    sharing the fixture keeps the two from drifting apart.  `expected` is
+    meaningless when it is overridden and the caller ignores it.
+    """
+    _, dump_inputs, rows = DUMP
+    inputs = dump_inputs if inputs is None else inputs
     n = len(inputs)
     col = {name: np.array([np.float32(r[j]) for r in inputs], dtype=np.float32)
            for j, name in enumerate(COLUMNS)}
@@ -192,8 +199,9 @@ def _batch(device="cpu"):
         fs2=t(col["fs2"]), hs=t(col["hs"]), ifob13=t(col["ifob13"]),
         rcnse=t(col["rcnse"]), freq=t(col["freq"]),
         gcd=t(col["gcdkm"] / np.float32(6370.0)))
-    expected = np.array([[np.float32(x) for x in r] for r in rows],
-                        dtype=np.float32)
+    expected = (np.array([[np.float32(x) for x in r] for r in rows],
+                         dtype=np.float32)
+                if inputs is dump_inputs else None)
     return args, expected, col
 
 
