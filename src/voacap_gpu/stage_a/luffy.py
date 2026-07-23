@@ -86,6 +86,7 @@ from .gmloss import gmloss
 from .inmuf import inmuf
 from .lecden import lecden
 from .lngpat import lngpat
+from .lsmooth import SmoothStore, blend, save_pass
 from .mpath import mpath
 from .relbil import relbil
 from .selmod import selmod
@@ -134,6 +135,9 @@ def luffy(circ, ipflag: int) -> None:
 
 def _luffy(c, ipflag: int) -> None:
     ipfg = ipflag
+    # LUFFY's "TEMPORARY STORAGE" -- only the smoothing recycle reads it, and
+    # it has to outlive the first pass, so it is made once per hour here.
+    store = SmoothStore()
     if c.mspec == 121 and c.gcdkm > _SMOOTH_MAX:
         ipfg = 200                           # long-path SETUP only; see docstring
         c.mspec = 0                          # beyond the smoothing distance
@@ -149,43 +153,55 @@ def _luffy(c, ipflag: int) -> None:
     # .....GET NOISE VALUE AT 1 MHZ FOR RCVR SITE
     anois1(c.anois, c.iono, c.time.gmtr, c.rlong, c.rlongd, c.rlat)
 
-    k, xmdl = _select_area(c, ipfg)          # labels 83, 84, 85
-    # .....CAN RUN FOR SHORT PATHS ALSO, SO SET ALL SAMPLE AREAS
-    setlng(c.layers, c.rays)
-    # .....SET ABSORPTION LOSS PARAMETERS, ADJUST SIGNAL DISTRIBUTION TABLES
-    sigdis(c.layers, c.muf, c.iono, c.sigd, c.ton, c.gcdkm, c.frq.jmode)
+    # Label 83.  The smoothing recycle comes back here, NOT to the top: SELMOD
+    # and ANOIS1 are above the label and run once for both models.
+    while True:
+        k, xmdl = _select_area(c, ipfg)      # labels 83, 84, 85
+        # .....CAN RUN FOR SHORT PATHS ALSO, SO SET ALL SAMPLE AREAS
+        setlng(c.layers, c.rays)
+        # .....SET ABSORPTION LOSS PARAMETERS, ADJUST SIGNAL DISTRIBUTION
+        # .....TABLES
+        sigdis(c.layers, c.muf, c.iono, c.sigd, c.ton, c.gcdkm, c.frq.jmode)
 
-    ihmin = _min_hops(c.muf.nhopmf)          # IHMX is computed here and dead
+        ihmin = _min_hops(c.muf.nhopmf)      # IHMX is computed here and dead
 
-    # .....START FREQUENCY LOOP
-    c.son.nhp[I_LUF] = -1
-    c.son.mdl[I_LUF] = xmdl                  # XMDL, chosen with K at label 83
-    for ifx in range(1, NFREQ + 1):
-        c.son.mdl[ifx] = " "
+        # .....START FREQUENCY LOOP
+        c.son.nhp[I_LUF] = -1
+        c.son.mdl[I_LUF] = xmdl              # XMDL, chosen with K at label 83
+        for ifx in range(1, NFREQ + 1):
+            c.son.mdl[ifx] = " "
 
-    for ifx in range(1, NFREQ + 1):          # DO 265 IFX=1,12
-        if _frequency(c, ifx, ipflag, k, ihmin, pluf):
-            _luf_found(c, ifx, pluf)         # label 165
+        for ifx in range(1, NFREQ + 1):      # DO 265 IFX=1,12
+            if _frequency(c, ifx, ipflag, k, ihmin, pluf, store):
+                _luf_found(c, ifx, pluf)     # label 165
+                return
+        # .....END OF FREQUENCY LOOP
+        if not _after_loop(c, ipflag, store):
             return
-    # .....END OF FREQUENCY LOOP
-    _after_loop(c, ipflag)
+        # .....DO LONG AND SHORT PATH MODEL: round two, the other model.
+        ipflag = 200
+        ipfg = 200
 
 
-def _after_loop(c, ipflag: int) -> None:
-    """What happens once every frequency has been done."""
+def _after_loop(c, ipflag: int, store=None) -> bool:
+    """What happens once every frequency has been done.
+
+    Returns True to say "go back to label 83 and run the other model", which
+    only the first pass of the smoothing recycle does.
+    """
     if c.method == 25:
-        return
+        return False
     if ipflag >= 300:
         _no_luf(c)                           # label 300
-        return
+        return False
     # .....SMOOTHING ONLY FOR DISTANCES 7000 - 10000 KM.  MSPEC was zeroed on
     # entry past 10000 km, so that case leaves here too.
     if c.mspec != 121 or not _SMOOTH_MIN <= c.gcdkm <= _SMOOTH_MAX:
-        return
-    raise SmoothingNotImplemented(
-        f"METHOD 30 at {float(c.gcdkm):.0f} km runs BOTH models and blends "
-        "them per frequency; each model works, but the recycle and the "
-        "smoothing formula (luffy.for 330-369 and 396-524) are not ported")
+        return False
+    if ipflag == 100:
+        return True                          # run the long path, then blend
+    blend(c, store)
+    return False
 
 
 def _select_area(c, ipfg: int):
@@ -248,7 +264,8 @@ def _min_hops(nhopmf) -> int:
     return ihmin
 
 
-def _frequency(c, ifx: int, ipflag: int, k: int, ihmin: int, pluf) -> bool:
+def _frequency(c, ifx: int, ipflag: int, k: int, ihmin: int, pluf,
+               store) -> bool:
     """One trip through DO 265.  Returns True when the LUF has been found."""
     ipfg = ipflag                            # line 179; see the module docstring
     if ipfg < 300:
@@ -277,25 +294,30 @@ def _frequency(c, ifx: int, ipflag: int, k: int, ihmin: int, pluf) -> bool:
     _genois(c, freq)
     relbil(c.allm, c.anois, c.sigd, c.son, c.cant, ifx, freq, c.rsn, c.lufp)
 
-    if ipfg >= 300:
-        # .....TEST RELIABILITY
-        return bool(c.son.reliab[ifx] >= pluf)
-
-    if c.want_service_prob:                  # IF( LINBOT(14) ) 285,285,280
-        serprb(c.allm, c.anois, c.ton, c.son, ifx, c.rsn, c.lufp)
-    if ipfg == 100:
-        # .....CALCULATE MULTIPATH
-        mpath(c.allm, c.son, ifx, c.dmp, c.pmp, c.gcdkm, c.method, c.mspec)
+    if ipfg < 300:
+        if c.want_service_prob:              # IF( LINBOT(14) ) 285,285,280
+            serprb(c.allm, c.anois, c.ton, c.son, ifx, c.rsn, c.lufp)
+        if ipfg == 100:
+            # .....CALCULATE MULTIPATH
+            mpath(c.allm, c.son, ifx, c.dmp, c.pmp, c.gcdkm, c.method,
+                  c.mspec)
+        else:
+            # .....SET RECEIVER END.  The long path has no hop loop to fill
+            # /SON/ ANGLER, so it comes from the mode LNGPAT left in slot 2.
+            is_ = int(c.allm.nmode[2])
+            if not 1 <= is_ <= len(LAYTYP):
+                raise IndexError(
+                    f"/allMODE/ NMODE(2) is {is_}, outside LAYTYP "
+                    f"1..{len(LAYTYP)}")
+            c.son.moder[ifx] = LAYTYP[is_ - 1]
+            c.son.angler[ifx] = c.allm.b[2]
+        # OUTALL(IFX) is presentation only under METHOD 25 -- out of scope.
     else:
-        # .....SET RECEIVER END.  The long path has no hop loop to fill /SON/
-        # ANGLER, so it is taken from the mode LNGPAT left in slot 2.
-        is_ = int(c.allm.nmode[2])
-        if not 1 <= is_ <= len(LAYTYP):
-            raise IndexError(
-                f"/allMODE/ NMODE(2) is {is_}, outside LAYTYP 1..{len(LAYTYP)}")
-        c.son.moder[ifx] = LAYTYP[is_ - 1]
-        c.son.angler[ifx] = c.allm.b[2]
-    # OUTALL(IFX) is presentation only under METHOD 25 -- out of scope.
+        # .....TEST RELIABILITY
+        if c.son.reliab[ifx] >= pluf:
+            return True                      # label 165, and no save
+    if c.mspec == 121:
+        save_pass(c, store, ifx, ipflag)
     return False
 
 

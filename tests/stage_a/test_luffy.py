@@ -15,9 +15,10 @@ import pytest
 
 from voacap_gpu.stage_a.circuit import Circuit
 from voacap_gpu.stage_a.f32math import F32
-from voacap_gpu.stage_a.luffy import (SmoothingNotImplemented, _after_loop,
-                                      _luf_found, _min_hops, _no_luf,
-                                      _select_area)
+from voacap_gpu.stage_a.f32math import log10_32, pow32
+from voacap_gpu.stage_a.lsmooth import SmoothStore
+from voacap_gpu.stage_a.luffy import (_after_loop, _luf_found, _min_hops,
+                                      _no_luf, _select_area)
 
 
 def _hops(n1, n2, n3):
@@ -77,22 +78,50 @@ def test_the_long_path_builds_an_ionosphere_at_BOTH_ends():
     assert c.frq.itxrcp[1] == 0 and c.frq.itxrcp[2] == 0, "and sets no ends"
 
 
-def test_the_smoothing_recycle_refuses():
-    """METHOD 30 between 7000 and 10000 km runs BOTH models and blends them
-    per frequency.  Each model works now, but the recycle and the smoothing
-    formula do not -- so this still has to refuse rather than return early
-    and silently hand back a short-path-only answer."""
+def test_the_smoothing_band_recycles_into_the_second_model():
+    """METHOD 30 between 7000 and 10000 km runs BOTH models and blends them.
+
+    _after_loop returns True to mean "go back to label 83 and run the other
+    one", which is the recycle.  It says that only on the FIRST pass: coming
+    back with IPFLAG already 200 means both passes are done, so it blends
+    instead."""
     for km in (7000.0, 8809.0, 10000.0):
-        with pytest.raises(SmoothingNotImplemented):
-            _after_loop(Circuit(mspec=121, gcdkm=F32(km), method=20), 100)
+        c = Circuit(mspec=121, gcdkm=F32(km), method=20)
+        assert _after_loop(c, 100, SmoothStore()) is True, f"{km} km recycles"
 
 
-def test_the_bands_either_side_of_the_smoothing_range_do_not():
+def test_the_bands_either_side_of_the_smoothing_range_do_not_recycle():
     for km in (6999.0, 343.0, 10001.0, 18334.0):
-        _after_loop(Circuit(mspec=121, gcdkm=F32(km), method=20), 100)
+        c = Circuit(mspec=121, gcdkm=F32(km), method=20)
+        assert _after_loop(c, 100, SmoothStore()) is False
     # MSPEC 0 never smooths at any distance, and METHOD 25 leaves first.
-    _after_loop(Circuit(mspec=0, gcdkm=F32(8809.0), method=20), 100)
-    _after_loop(Circuit(mspec=121, gcdkm=F32(8809.0), method=25), 100)
+    assert _after_loop(Circuit(mspec=0, gcdkm=F32(8809.0), method=20), 100,
+                       SmoothStore()) is False
+    assert _after_loop(Circuit(mspec=121, gcdkm=F32(8809.0), method=25), 100,
+                       SmoothStore()) is False
+
+
+def test_the_smoothing_blend_joins_the_two_models_continuously():
+    """SMOOTH = SSPLD + 10*log10(DISINT*(10^(DELPOW/10) - 1) + 1).
+
+    At DISINT 0 (7000 km) that collapses to the short path's own level and at
+    DISINT 1 (10000 km) to the long path's, so the interpolation meets each
+    pure model exactly where that model takes over."""
+    def smooth(gcdkm, sspld, slpld):
+        disint = F32((F32(gcdkm) - F32(7000.0)) / F32(3000.0))
+        delpow = F32(slpld) - F32(sspld)
+        delx = pow32(F32(10.0), delpow / F32(10.0))
+        return F32(sspld) + F32(10.0) * log10_32(
+            disint * (delx - F32(1.0)) + F32(1.0))
+
+    assert float(smooth(7000.0, -120.0, -110.0)) == pytest.approx(-120.0,
+                                                                 abs=1e-3)
+    assert float(smooth(10000.0, -120.0, -110.0)) == pytest.approx(-110.0,
+                                                                  abs=1e-3)
+    mid = float(smooth(8500.0, -120.0, -110.0))
+    assert -120.0 < mid < -110.0, "and lands between them in the band"
+    # The blend is on POWER, so the midpoint sits well above the dB midpoint.
+    assert mid > -115.0
 
 
 def test_the_luf_interpolates_between_the_bracketing_frequencies():

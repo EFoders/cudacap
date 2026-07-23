@@ -24,12 +24,12 @@ DECKS="$REPO_ROOT/golden/p2p/matrix/decks"
 
 [[ -d "$BUILD" ]] || { echo "oracle build tree missing — run tools/oracle/build_oracle.sh" >&2; exit 1; }
 
-# Both models, since both are now ported.  NOT included: any deck that hits
-# the MSPEC-121 smoothing recycle between 7000 and 10000 km, which still
-# refuses -- that is latok and toksyd on METHOD 30.
+# All three regimes, since all three are now ported.
 #
-# latok_m01_s100_v20 at 8809 km IS here, deliberately: METHOD 20 leaves MSPEC
-# at 0, so it stays short-path despite being past the smoothing distance.
+# latok_m01_s100_v20 at 8809 km is in the SHORT list deliberately: METHOD 20
+# leaves MSPEC at 0, so it stays short-path despite being past the smoothing
+# distance.  The same circuit on METHOD 30 is in the SMOOTH list, so the two
+# sit side by side and the method is the only difference between them.
 #
 # The run CLEARS every CSV in the destination first, so this list has to name
 # every deck the replay test expects -- capturing a subset deletes the rest.
@@ -40,7 +40,13 @@ SHORT_DECKS="lonpar_m01_s100_v30 lonpar_m07_s15_v30 lonpar_m10_s160_v30
 # Past 10000 km, where HFMUFS forces IPFG 200 outright.
 LONG_DECKS="sydstg_m01_s100_v30 sydstg_m07_s160_v30 sydstg_m10_s15_v30
             lonakl_m01_s100_v30 lonakl_m07_s15_v30 lonakl_m01_s100_v30_long"
-DEFAULT_DECKS="$SHORT_DECKS $LONG_DECKS"
+# Between 7000 and 10000 km on METHOD 30, where LUFFY runs BOTH models and
+# blends them.  Still 24 rows: the recycle is INSIDE LUFFY (luffy.for's GO TO
+# 83), so the shim sees one entry and one exit per hour and what it captures
+# at exit is the blended answer, not either pass on its own.
+SMOOTH_DECKS="latok_m01_s100_v30 latok_m07_s15_v30 latok_m10_s160_v30
+              toksyd_m01_s100_v30 toksyd_m07_s160_v30"
+DEFAULT_DECKS="$SHORT_DECKS $LONG_DECKS $SMOOTH_DECKS"
 DECK_LIST=("$@")
 # shellcheck disable=SC2206
 [[ ${#DECK_LIST[@]} -eq 0 ]] && DECK_LIST=($DEFAULT_DECKS)
