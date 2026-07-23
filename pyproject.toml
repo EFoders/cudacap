@@ -9,6 +9,7 @@ description = "GPU rewrite of VOACAP HF propagation prediction (PyTorch), valida
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "cupy-cuda12x[ctk]>=14.1.1",
     "numpy>=1.26",
     "torch>=2.7",
 ]
