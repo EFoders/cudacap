@@ -32,9 +32,9 @@ version is bound by kernel launches rather than by arithmetic.  The batch
 converges in 130-256 lockstep steps and each step issues about forty small
 kernels; eagerly, that pins CUDA at ~300 ms REGARDLESS OF LANE COUNT.
 
-``_run_lockstep`` therefore captures one step into a CUDA GRAPH and replays
-it, turning forty launches per step into one.  Against the 30 us/lane scalar
-Stage A:
+``lockstep.run_lockstep`` therefore captures one step into a CUDA GRAPH and
+replays it, turning forty launches per step into one.  Against the 30 us/lane
+scalar Stage A:
 
                     eager    graph          graph vs scalar
         180 lanes   299 ms    46 ms   6.6x    8x slower
@@ -65,6 +65,8 @@ a different libm, and the test bars accordingly.
 import torch
 
 from voacap_gpu.stage_a.constants import D2R, PIO2, R2D, RZ
+from voacap_gpu.stage_b.lockstep import gather_rows as _g
+from voacap_gpu.stage_b.lockstep import run_lockstep
 from voacap_gpu.stage_b.profile import _k
 
 _F32 = torch.float32
@@ -73,67 +75,6 @@ NRAY = 45                       # the ray table FINDF fills, 1-based
 _DONE = 230                     # the terminal label
 _MAX_STEPS = 600                # see the module docstring
 _EPS = 0.001
-_CHECK_EVERY = 16               # graph replays between completion checks
-
-
-def _run_lockstep(step, pc, buffers, use_cuda_graph):
-    """Drive `step` until every lane parks at the terminal label.
-
-    The eager path calls it in a Python loop, which is correct but issues
-    ~40 kernel launches per step and is what makes the routine launch-bound.
-    The CUDA-graph path records those launches once and replays the lot with
-    a single one.
-
-    CAPTURE HAS TO BE FED A COLD STATE.  CUDA graph capture requires a warmup
-    on a side stream, and the warmup genuinely RUNS the step -- so it advances
-    the very state machine being captured.  Every buffer is therefore cloned
-    beforehand and restored both after the warmup and after the capture; skip
-    either restore and the answer is silently the result of starting a few
-    steps in.
-    """
-    if not (use_cuda_graph and pc.is_cuda):
-        for _ in range(_MAX_STEPS):
-            if not bool((pc != _DONE).any()):
-                return
-            step()
-        raise RuntimeError(
-            f"FDIST lockstep did not converge in {_MAX_STEPS} steps; IH only "
-            "increases, so this means a transition is wrong")
-
-    saved = [b.clone() for b in buffers]
-
-    def _restore():
-        for buf, cold in zip(buffers, saved):
-            buf.copy_(cold)
-
-    stream = torch.cuda.Stream()
-    stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(stream):
-        for _ in range(3):
-            step()
-    torch.cuda.current_stream().wait_stream(stream)
-    _restore()
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        step()
-    _restore()
-
-    # A lane parked at the terminal label is a no-op apart from touching the
-    # scratch sink, so over-replaying is harmless and the check can be rare.
-    for _ in range(0, _MAX_STEPS, _CHECK_EVERY):
-        for _ in range(_CHECK_EVERY):
-            graph.replay()
-        if not bool((pc != _DONE).any()):
-            return
-    raise RuntimeError(
-        f"FDIST lockstep did not converge in {_MAX_STEPS} steps; IH only "
-        "increases, so this means a transition is wrong")
-
-
-def _g(arr, idx):
-    """arr[idx[lane], lane] for every lane."""
-    return torch.gather(arr, 0, idx.unsqueeze(0)).squeeze(0)
 
 
 def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
@@ -300,9 +241,9 @@ def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
 
         pc.copy_(nxt)
 
-    _run_lockstep(_step, pc,
-                  (pc, ih, il, dth2, delmod, hpmod, htmod, fvmod, afmod,
-                   itmod), use_cuda_graph)
+    run_lockstep(_step, pc,
+                 (pc, ih, il, dth2, delmod, hpmod, htmod, fvmod, afmod,
+                  itmod), _DONE, _MAX_STEPS, "FDIST", use_cuda_graph)
 
     # Clear the sink.  A lane that finished early keeps riding along and
     # keeps scattering into row 0, so how many times row 0 was written
