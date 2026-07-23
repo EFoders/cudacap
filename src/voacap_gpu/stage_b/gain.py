@@ -48,7 +48,16 @@ class BatchedCantenna:
     """/cantenna/ + /pantenna/ on the device, shared by every lane.
 
     array: (31, 92, A+1) gain tables, 1-based in all three axes.
-    aeff:  (31, A+1) efficiencies.  iats/xfqs/xfqe/offazim/pwrdba: (A+1,).
+    aeff:  (31, A+1) efficiencies.  iats/offazim: (A+1,).
+
+    xfqs/xfqe/pwrdba: (A+1,) normally, but ALSO ACCEPTED AS (A+1, N).  The
+    band edges and the transmit power are the parts of an antenna entry a
+    batch can legitimately vary -- the same physical antenna run at different
+    powers across a sweep -- while the PATTERN cannot, since a per-lane
+    ARRAY would be (31, 92, A+1, N) and defeat the point of sharing it.  Every
+    use of these three is elementwise against an (N,) frequency, so the wider
+    shape broadcasts with no special case; only `iats` and `offazim` are
+    indexed as pure per-entry properties.
     """
 
     array: torch.Tensor
