@@ -130,16 +130,22 @@ def ground_loss_batch(sigpat, epspat, delta, fmc):
     return torch.where(sigpat <= 0.0, torch.zeros_like(rain), rain)
 
 
-def antenna_gain_batch(cant, itr, delta, fmc):
-    """GAIN's ITR>=0 branch: bilinear gain lookup.  Returns (rain, eff).
+def check_gain_indices(cant, itr, delta, fmc):
+    """Refuse the out-of-bounds table read, as a SEPARATE, SYNCHRONISING pass.
 
-    itr: 1 = transmitter, 2 = receiver (a scalar; the terminal is a property
-    of the call, not of the lane).  delta: (N,) elevation in RADIANS.
-    fmc: (N,) MHz.  RAIN is a gain in dB here, not a loss.
+    This is the whole reason ``antenna_gain_batch`` could not be captured into
+    a CUDA graph.  The two ``.any()`` calls read a device tensor on the host,
+    and a host sync inside a capture does not raise -- it invalidates the
+    capture and poisons every later CUDA call in the process.
 
-    Both axes clamp only at the TOP, so the top cell holds flat rather than
-    extrapolating.  See the module docstring for why the missing bottom clamp
-    raises instead.
+    Separating it is safe because the check is a POLICY refusal, not a memory
+    guard: the gathers below clamp their indices regardless, so nothing reads
+    out of bounds either way.  What the check buys is that a caller who has
+    driven GAIN outside its table hears about it instead of silently getting
+    a clamped answer the Fortran would never have produced.
+
+    So: call this once, eagerly, outside any captured region, then call
+    ``antenna_gain_batch(..., validate=False)`` as many times as you like.
     """
     iat = _select(cant, itr, fmc)
     matched = iat > 0
@@ -147,8 +153,7 @@ def antenna_gain_batch(cant, itr, delta, fmc):
         raise NotImplementedError(
             "area-coverage antennas (OFFAZIM == -999) use /Careaant/ "
             "IARRAY360; point-to-point mode is ported first")
-
-    i = torch.trunc(fmc).to(torch.long)      # REAL->INT truncates toward zero
+    i = torch.trunc(fmc).to(torch.long)
     deltd = delta * _k(R2D, fmc)
     j = torch.trunc(deltd + _k(1.0, fmc)).to(torch.long).clamp(max=NELEV)
     # I is NOT clamped at the top either -- only IP1 gets MIN0(30,..) -- so an
@@ -163,6 +168,32 @@ def antenna_gain_batch(cant, itr, delta, fmc):
             f"{int(i[bad].max())}], J in [{int(j[bad].min())}, "
             f"{int(j[bad].max())}]; need 1 <= I <= {NFREQ} and J >= 1, so "
             "honour XFQS/XFQE and pass a non-negative elevation")
+
+
+def antenna_gain_batch(cant, itr, delta, fmc, validate=True):
+    """GAIN's ITR>=0 branch: bilinear gain lookup.  Returns (rain, eff).
+
+    itr: 1 = transmitter, 2 = receiver (a scalar; the terminal is a property
+    of the call, not of the lane).  delta: (N,) elevation in RADIANS.
+    fmc: (N,) MHz.  RAIN is a gain in dB here, not a loss.
+
+    Both axes clamp only at the TOP, so the top cell holds flat rather than
+    extrapolating.  See the module docstring for why the missing bottom clamp
+    is refused rather than reproduced.
+
+    ``validate=False`` skips that refusal and with it the two host syncs it
+    needs, which is what lets this run inside a CUDA graph capture.  The
+    caller then owes one ``check_gain_indices`` on the same inputs, outside
+    the captured region -- see that function.  The ARITHMETIC is identical
+    either way; only the refusal is dropped.
+    """
+    if validate:
+        check_gain_indices(cant, itr, delta, fmc)
+    iat = _select(cant, itr, fmc)
+    matched = iat > 0
+    i = torch.trunc(fmc).to(torch.long)      # REAL->INT truncates toward zero
+    deltd = delta * _k(R2D, fmc)
+    j = torch.trunc(deltd + _k(1.0, fmc)).to(torch.long).clamp(max=NELEV)
     xfmc = fmc - i.to(_F32)
     xdelta = deltd - (j - 1).to(_F32)
 

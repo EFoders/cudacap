@@ -118,6 +118,7 @@ import torch
 from voacap_gpu.stage_a.constants import D2R, PIO2, RZ, VOFL
 from voacap_gpu.stage_b.gain import (antenna_gain_batch, ground_loss_batch,
                                      pwrdb_batch)
+from voacap_gpu.stage_b.gain import check_gain_indices
 from voacap_gpu.stage_b.graph import StraightLineGraph
 from voacap_gpu.stage_b.lockstep import gather_rows
 from voacap_gpu.stage_b.normal import prbmuf_batch
@@ -205,6 +206,31 @@ def regmod_batch(modes, muf, sigd, cant, sigpat, epspat, km,
             "frequency must be positive where a mode exists; the "
             "Fortran STOPs")
 
+    # GAIN's refusal of the Fortran's out-of-bounds table read is the OTHER
+    # host sync, and it used to force the whole GAIN block to stay eager.  It
+    # is a policy check rather than a memory guard -- the gathers clamp
+    # regardless -- so it runs once here, over every take-off angle GAIN will
+    # be asked about, and the calls themselves then run sync-free.
+    # ALL SIX MODES AT ONCE, in two calls rather than twelve.  Validating per
+    # mode simply relocates the syncs it was meant to remove -- measured, the
+    # check is 0.63 ms a call and REGMOD makes twelve of them, so the per-mode
+    # loop was a wash.  Dead slots get a known-good angle rather than being
+    # skipped, because skipping them is itself a sync.
+    # THE MINIMUM LIVE TAKE-OFF ANGLE IS EXACTLY EQUIVALENT to checking all
+    # six.  GAIN's frequency index does not depend on the angle at all, and
+    # its elevation index fails only from BELOW -- J = INT(DELTD)+1 < 1 iff
+    # DELTD < 0 -- so if the smallest live angle clears the bound, every angle
+    # does.  Dead slots take a known-good 0.5 rad rather than being masked
+    # out, because masking them is itself a sync.
+    _safe = _k(0.5, freq).expand_as(freq)
+    _dmin = _safe
+    for _im in range(1, NMODES):
+        _dmin = torch.minimum(
+            _dmin, torch.where(modes["hpmod"][_im] > 0.0,
+                               modes["delmod"][_im] * _k(D2R, freq), _safe))
+    check_gain_indices(cant, 1, _dmin, freq)
+    check_gain_indices(cant, 2, _dmin, freq)
+
     core = _gain_prologue(modes, cant, sigpat, epspat, km, freq)
     core.update({name: modes[name] for name in
                  ("delmod", "hpmod", "htmod", "fvmod", "afmod", "itmod",
@@ -261,8 +287,10 @@ def _gain_prologue(modes, cant, sigpat, epspat, km, freq):
         for ig in range(1, NAREA + 1):
             gl = ground_loss_batch(sigpat[ig - 1], epspat[ig - 1], del_g, freq)
             y = y + torch.where(ig <= km, gl, k0)      # + 0.0 is exact
-        tgain, _teff = antenna_gain_batch(cant, 1, del_g, freq)
-        rgain, eff = antenna_gain_batch(cant, 2, del_g, freq)
+        tgain, _teff = antenna_gain_batch(cant, 1, del_g, freq,
+                                          validate=False)
+        rgain, eff = antenna_gain_batch(cant, 2, del_g, freq,
+                                        validate=False)
         dels.append(del_)
         actives.append(active)
         grloss.append(y / km.to(_F32))
