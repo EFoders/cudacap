@@ -28,6 +28,8 @@ from .allmodestate import AllModeState
 from .antennastate import CantennaState
 from .frqstate import FrqState
 from .layerstate import LayerState
+from .losxstate import LosxState
+from .lpathstate import LpathState
 from .modesstate import ModesState
 from .mufstate import MufState
 from .noisestate import AnoisState, NoiseDiagState
@@ -64,6 +66,8 @@ class Circuit:
     cant: CantennaState = field(default_factory=CantennaState)
     frq: FrqState = field(default_factory=FrqState)
     time: TimeState = field(default_factory=TimeState)
+    losx: LosxState = field(default_factory=LosxState)
+    lpath: LpathState = field(default_factory=LpathState)
 
     # --- /DON/ path geometry and circuit requirements ---------------------
     gcd: F32 = F32(0.0)             # great-circle distance, radians
@@ -91,3 +95,9 @@ class Circuit:
 
     # --- /OUTPRT/ LINBOT(14) ---------------------------------------------
     want_service_prob: bool = True
+
+    # --- /INFORM/ INFO ----------------------------------------------------
+    # The diagnostic mask.  Bit 4 is NOT inert: it doubles SELTXR's selection
+    # pass, and the second pass inherits state from the first, so setting it
+    # can change which ray the long path chooses.  See seltxr.py.
+    info: int = 0

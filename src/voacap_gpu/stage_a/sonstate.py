@@ -77,6 +77,10 @@ class SonState:
     mdl: list = field(default_factory=_labels)
     # /ALPHA/ MODE(13) -- the layer label for the most reliable mode
     mode: list = field(default_factory=_labels)
+    # /ALPHA/ MODER(13) -- the same for the RECEIVER end, which only the long
+    # path fills: the short path has one mode with one layer, so MODE says it
+    # all, but a long-path mode arrives at a different layer than it left.
+    moder: list = field(default_factory=_labels)
     # /DUDL_NOIS/
     du_nois: np.ndarray = field(default_factory=_z)
     dl_nois: np.ndarray = field(default_factory=_z)

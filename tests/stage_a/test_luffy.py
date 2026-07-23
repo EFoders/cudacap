@@ -15,13 +15,31 @@ import pytest
 
 from voacap_gpu.stage_a.circuit import Circuit
 from voacap_gpu.stage_a.f32math import F32
-from voacap_gpu.stage_a.luffy import (LongPathNotImplemented, _after_loop,
+from voacap_gpu.stage_a.luffy import (SmoothingNotImplemented, _after_loop,
                                       _luf_found, _min_hops, _no_luf,
                                       _select_area)
 
 
 def _hops(n1, n2, n3):
     return np.array([0, n1, n2, n3, 0], dtype=np.int32)
+
+
+def _plausible():
+    """A Circuit whose layers are merely non-degenerate.
+
+    These tests are about which area gets built, not about what comes out of
+    it -- but a Circuit straight from the constructor has zero semithicknesses,
+    and LECDEN and ALOSFV both divide by those.  The resulting profile is
+    meaningless and unused; it just keeps the arithmetic finite so a real
+    warning from somewhere else would still stand out."""
+    c = Circuit()
+    c.layers.km = 5
+    for k in range(1, 6):
+        for ly in (1, 2, 3):
+            c.layers.fi[ly, k] = F32(3.0 + ly)
+            c.layers.yi[ly, k] = F32(20.0 + 10.0 * ly)
+            c.layers.hi[ly, k] = F32(100.0 + 50.0 * ly)
+    return c
 
 
 def test_min_hops_skips_f1_when_it_carries_no_modes():
@@ -34,18 +52,38 @@ def test_min_hops_skips_f1_when_it_carries_no_modes():
     assert _min_hops(_hops(1, 1, 1)) == 1
 
 
-def test_the_long_path_arms_refuse():
+def test_the_long_path_builds_an_ionosphere_at_BOTH_ends():
+    """The short path has one controlling area; the long path has two.
+
+    Over 10,000 km the ends are in different places and different local
+    times, so each gets its own ionosphere -- and ITXRCP records which area
+    belongs to which end, where the short path leaves it alone."""
     for ipfg in (200, 400):
-        with pytest.raises(LongPathNotImplemented):
-            _select_area(Circuit(), ipfg)
+        c = _plausible()
+        c.layers.kfx = 4
+        c.frq.jmode = 2
+        k, xmdl = _select_area(c, ipfg)
+        assert c.jlong == 1, "the long-path flag"
+        assert c.frq.itxrcp[1] == 1, "transmitter end is area 1"
+        assert c.frq.itxrcp[2] == 4 and k == 4, "receiver end is KFX"
+        assert xmdl == "L"
+
+    c = _plausible()
+    c.layers.kfx = 4
+    c.frq.jmode = 2
+    k, xmdl = _select_area(c, 100)
+    assert c.jlong == -1 and k == 2, "the short path stays on SELMOD's area"
+    assert xmdl == "S"
+    assert c.frq.itxrcp[1] == 0 and c.frq.itxrcp[2] == 0, "and sets no ends"
 
 
 def test_the_smoothing_recycle_refuses():
-    """METHOD 30 between 7000 and 10000 km runs the short path, then the long
-    path, then blends them.  That is the ordinary behaviour of a long-haul
-    circuit, not a corner -- so it has to refuse rather than return early."""
+    """METHOD 30 between 7000 and 10000 km runs BOTH models and blends them
+    per frequency.  Each model works now, but the recycle and the smoothing
+    formula do not -- so this still has to refuse rather than return early
+    and silently hand back a short-path-only answer."""
     for km in (7000.0, 8809.0, 10000.0):
-        with pytest.raises(LongPathNotImplemented):
+        with pytest.raises(SmoothingNotImplemented):
             _after_loop(Circuit(mspec=121, gcdkm=F32(km), method=20), 100)
 
 

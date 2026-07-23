@@ -23,8 +23,21 @@ collection to RELBIL for a single answer.
         SERPRB, MPATH             service and multipath probability
 
 IPFLAG selects the model: 100 short-path system performance, 200 long-path,
-300 short-path LUF, 400 long-path LUF.  **Only the short-path arms (100 and
-300) are implemented here**; the long-path body raises.
+300 short-path LUF, 400 long-path LUF.  All four run.
+
+The long path is a different shape rather than a longer version of the same
+thing.  Over 10,000 km the two ends of the circuit are in different places,
+different local times and often different hemispheres, so there is no single
+controlling ionosphere to sweep hop counts through.  Instead each end gets
+its own ionosphere and its own ray table, SETTXR prices all 45 rays at each,
+SELTXR picks one per end, and LNGPAT joins the pair into a single mode
+written straight into /allMODE/ slot 1.  No hop loop, no /ZON/ accumulation,
+exactly one mode per frequency:
+
+    FINDF x2                  a ray table at each end
+    GMLOSS -> SETTXR          price all 45 rays at both
+    SELTXR                    choose one ray per end
+    LNGPAT                    join them into one mode
 
 Four notes on the original that shape this port.
 
@@ -49,14 +62,12 @@ written; see ``_no_luf``.
 never read) and IXHP (a hop counter incremented and never read).  Noted where
 they would go rather than transcribed.
 
-**The 7000-10000 km recycle needs the long path.**  With MSPEC 121 in that
-band the routine runs the short path, jumps back to label 83 with IPFLAG
-forced to 200, runs the long path, and blends the two.  That is METHOD 30's
-normal behaviour for a long-haul circuit, not an exotic corner.  The /SON/
-columns the blend consumes are saved per frequency into (13,2) temporaries at
-lines 330-369; that save is deliberately NOT transcribed here, because
-nothing this port can run would ever read it back.  It lands with the long
-path.
+**The 7000-10000 km recycle is not ported.**  With MSPEC 121 in that band the
+routine runs the short path, jumps back to label 83 with IPFLAG forced to
+200, runs the long path, and blends the two per frequency (lines 330-369 save
+the /SON/ columns into (13,2) temporaries; 396-524 do the blend).  Both arms
+of that now exist, but the recycle and the smoothing itself do not, so
+``_after_loop`` still refuses there.
 """
 
 from .allmodes import allmodes
@@ -71,14 +82,18 @@ from .fobby import fobby
 from .frqcom import frqcom
 from .genion import genion
 from .genois import genois
+from .gmloss import gmloss
 from .inmuf import inmuf
 from .lecden import lecden
+from .lngpat import lngpat
 from .mpath import mpath
 from .relbil import relbil
 from .selmod import selmod
+from .seltxr import seltxr
 from .serprb import serprb
 from .setlng import setlng
 from .sigdis import sigdis
+from .sonstate import LAYTYP
 
 NFREQ = 12                      # DO 265 IFX=1,12 -- 11 frequencies plus the MUF
 I_LUF = 13                      # FREA(13)/MDL(13)/NHP(13), the summary slot
@@ -89,8 +104,17 @@ _ES_FVAL = F32(999.0)           # ALLMODES(2,FVAL): the sentinel "frequency"
 _MAX_EXTRA_HOPS = 2             # IHSTP = MIN0(IHMAX, IHSRT+2)
 
 
-class LongPathNotImplemented(NotImplementedError):
-    """The long-path arm (GMLOSS + SELTXR + LNGPAT) is not ported yet."""
+class SmoothingNotImplemented(NotImplementedError):
+    """The MSPEC-121 short/long blend between 7000 and 10000 km.
+
+    Both models it blends are ported; the recycle that runs them back to back
+    and the smoothing formula itself are not.
+    """
+
+
+# The name the long-path arm raised under before that arm existed.  Kept so
+# an older caller catching it still catches the one case that still refuses.
+LongPathNotImplemented = SmoothingNotImplemented
 
 
 def luffy(circ, ipflag: int) -> None:
@@ -125,7 +149,7 @@ def _luffy(c, ipflag: int) -> None:
     # .....GET NOISE VALUE AT 1 MHZ FOR RCVR SITE
     anois1(c.anois, c.iono, c.time.gmtr, c.rlong, c.rlongd, c.rlat)
 
-    k = _select_area(c, ipfg)                # labels 83, 84, 85
+    k, xmdl = _select_area(c, ipfg)          # labels 83, 84, 85
     # .....CAN RUN FOR SHORT PATHS ALSO, SO SET ALL SAMPLE AREAS
     setlng(c.layers, c.rays)
     # .....SET ABSORPTION LOSS PARAMETERS, ADJUST SIGNAL DISTRIBUTION TABLES
@@ -135,7 +159,7 @@ def _luffy(c, ipflag: int) -> None:
 
     # .....START FREQUENCY LOOP
     c.son.nhp[I_LUF] = -1
-    c.son.mdl[I_LUF] = "S"                   # XMDL, set with K at label 83
+    c.son.mdl[I_LUF] = xmdl                  # XMDL, chosen with K at label 83
     for ifx in range(1, NFREQ + 1):
         c.son.mdl[ifx] = " "
 
@@ -158,39 +182,60 @@ def _after_loop(c, ipflag: int) -> None:
     # entry past 10000 km, so that case leaves here too.
     if c.mspec != 121 or not _SMOOTH_MIN <= c.gcdkm <= _SMOOTH_MAX:
         return
-    raise LongPathNotImplemented(
-        f"METHOD 30 at {float(c.gcdkm):.0f} km recycles into the long-path "
-        "model and blends the two results; GMLOSS, SELTXR and LNGPAT are not "
-        "ported")
+    raise SmoothingNotImplemented(
+        f"METHOD 30 at {float(c.gcdkm):.0f} km runs BOTH models and blends "
+        "them per frequency; each model works, but the recycle and the "
+        "smoothing formula (luffy.for 330-369 and 396-524) are not ported")
 
 
-def _select_area(c, ipfg: int) -> int:
-    """Labels 83-85: choose the control area and build its ionosphere."""
-    if ipfg not in (100, 300):
-        raise LongPathNotImplemented(
-            f"IPFG {ipfg} selects the long-path model (GMLOSS + SELTXR + "
-            "LNGPAT); only the short-path arms 100 and 300 are ported")
-    # .....SET FLAG TO INDICATE SHORT PATH MODEL
-    c.jlong = -1
-    k = c.frq.jmode
+def _select_area(c, ipfg: int):
+    """Labels 83-85: choose the control area and build its ionosphere.
+
+    Returns ``(k, xmdl)`` -- the area the frequency loop will work in, and the
+    one-letter model tag /SON/ MDL(13) carries.
+
+    The short path has ONE controlling area, the one SELMOD picked.  The long
+    path has TWO -- the transmitter end and the receiver end each get their
+    own ionosphere, because over 10,000 km the two ends are in different
+    places, different local times and often different hemispheres.  That is
+    the whole reason the long-path model exists.
+    """
+    if ipfg in (100, 300):
+        # .....SET FLAG TO INDICATE SHORT PATH MODEL
+        c.jlong = -1
+        xmdl = "S"
+        k = c.frq.jmode
+        goto_85 = False
+    else:
+        # .....SET FLAG TO INDICATE LONG PATH MODEL
+        c.jlong = 1
+        xmdl = "L"
+        # .....SELECT LONG PATH TRANSMITTER AREA
+        k = 1
+        c.frq.itxrcp[1] = 1
+        goto_85 = c.mspec == 121 and c.frq.jmode == k
 
     while True:
-        # .....ELECTRON DENSITY PROFILE -> IONOGRAM -> REFLECTRIX -> DEV LOSS
-        lecden(c.layers, k)
-        genion(c.layers, k)
-        fobby(c.layers, c.rays, k)
-        alosfv(c.layers, c.muf, k)
-        if ipfg == 100 or k > 1:
-            return k
-        # Label 85.  Short-path LUF with JMODE == 1 falls in here and rebuilds
-        # the ionosphere at the receiver index, leaving THAT one in place.
+        if not goto_85:
+            # .....ELECTRON DENSITY PROFILE -> IONOGRAM -> REFLECTRIX ->
+            # .....DEVIATION LOSS FACTOR
+            lecden(c.layers, k)
+            genion(c.layers, k)
+            fobby(c.layers, c.rays, k)
+            alosfv(c.layers, c.muf, k)
+            if ipfg == 100 or k > 1:
+                return k, xmdl
+        goto_85 = False
+        # Label 85.  The long path arrives here to build its RECEIVER end;
+        # short-path LUF with JMODE == 1 also falls in, and rebuilds the
+        # ionosphere at the receiver index, leaving THAT one in place.
         k = c.layers.kfx
         c.frq.itxrcp[2] = c.layers.kfx
         if c.mspec == 121 and c.frq.jmode == k:
-            return k
+            return k, xmdl
         if c.layers.kfx == 1:
             c.frq.itxrcp[2] = 2
-            return k
+            return k, xmdl
 
 
 def _min_hops(nhopmf) -> int:
@@ -224,15 +269,47 @@ def _frequency(c, ifx: int, ipflag: int, k: int, ihmin: int, pluf) -> bool:
     _genois(c, freq)
 
     if ipfg not in (100, 300):
-        raise LongPathNotImplemented(
-            "the long-path frequency body needs FINDF at both ends plus "
-            "GMLOSS, SELTXR and LNGPAT")
+        _long_path(c, freq)
+    elif _short_path(c, freq, k, ihmin, ipfg):
+        return False                         # label 122 -> 265, next frequency
 
+    # .....COMBINED RELIABILITY
+    _genois(c, freq)
+    relbil(c.allm, c.anois, c.sigd, c.son, c.cant, ifx, freq, c.rsn, c.lufp)
+
+    if ipfg >= 300:
+        # .....TEST RELIABILITY
+        return bool(c.son.reliab[ifx] >= pluf)
+
+    if c.want_service_prob:                  # IF( LINBOT(14) ) 285,285,280
+        serprb(c.allm, c.anois, c.ton, c.son, ifx, c.rsn, c.lufp)
+    if ipfg == 100:
+        # .....CALCULATE MULTIPATH
+        mpath(c.allm, c.son, ifx, c.dmp, c.pmp, c.gcdkm, c.method, c.mspec)
+    else:
+        # .....SET RECEIVER END.  The long path has no hop loop to fill /SON/
+        # ANGLER, so it is taken from the mode LNGPAT left in slot 2.
+        is_ = int(c.allm.nmode[2])
+        if not 1 <= is_ <= len(LAYTYP):
+            raise IndexError(
+                f"/allMODE/ NMODE(2) is {is_}, outside LAYTYP 1..{len(LAYTYP)}")
+        c.son.moder[ifx] = LAYTYP[is_ - 1]
+        c.son.angler[ifx] = c.allm.b[2]
+    # OUTALL(IFX) is presentation only under METHOD 25 -- out of scope.
+    return False
+
+
+def _short_path(c, freq, k: int, ihmin: int, ipfg: int) -> bool:
+    """The hop sweep: every mode at every plausible hop count, accumulated.
+
+    Returns True when the frequency should be abandoned outright (label 122's
+    ``go to 265``), which skips RELBIL and everything after it.
+    """
     # .....RAY SET TABLE
     findf(c.layers, c.reflx, c.rays, k, freq, c.amind)
     if c.reflx.dmaxkm[k] <= 0.0:
         if ipfg == 300:
-            return False
+            return True
         # .....ONLY ONE OVER THE MUF MODE
         ihsrt = ihstp = ihmin
     else:
@@ -263,22 +340,30 @@ def _frequency(c, ifx: int, ipflag: int, k: int, ihmin: int, pluf) -> bool:
           freq, c.frq.jmode, c.gcd, c.gcdkm, c.amind)
     esreg(c.zon)
     allmodes(c.zon, c.allm, 2, _ES_FVAL)
-
-    # .....COMBINED RELIABILITY
-    _genois(c, freq)
-    relbil(c.allm, c.anois, c.sigd, c.son, c.cant, ifx, freq, c.rsn, c.lufp)
-
-    if ipfg >= 300:
-        # .....TEST RELIABILITY
-        return bool(c.son.reliab[ifx] >= pluf)
-
-    if c.want_service_prob:                  # IF( LINBOT(14) ) 285,285,280
-        serprb(c.allm, c.anois, c.ton, c.son, ifx, c.rsn, c.lufp)
-    # IPFG is 100 here: 200 would set the receiver end from NMODE(2)/B(2).
-    # .....CALCULATE MULTIPATH
-    mpath(c.allm, c.son, ifx, c.dmp, c.pmp, c.gcdkm, c.method, c.mspec)
-    # OUTALL(IFX) is presentation only under METHOD 25 -- out of scope.
     return False
+
+
+def _long_path(c, freq) -> None:
+    """The two-ended model: price every ray at each end, pick one, join them.
+
+    Where the short path sweeps hop counts over a single ionosphere, this
+    builds a ray table at the transmitter and another at the receiver, has
+    SETTXR price all 45 rays at each, lets SELTXR choose one per end, and
+    hands the pair to LNGPAT to be joined into a single mode.  There is no
+    hop loop and no /ZON/ accumulation: LNGPAT writes /allMODE/ slot 1
+    directly, so the frequency ends up with exactly one mode.
+    """
+    # .....AREA COVERAGE, TRANSMITTER END, THEN RECEIVER END
+    findf(c.layers, c.reflx, c.rays, int(c.frq.itxrcp[1]), freq, c.amind)
+    findf(c.layers, c.reflx, c.rays, int(c.frq.itxrcp[2]), freq, c.amind)
+    # .....GAIN MINUS LOSS (which runs SETTXR)
+    gmloss(c.layers, c.muf, c.sigd, c.reflx, c.losx, c.rays, c.cant, c.allm,
+           c.zon, c.lpath, c.frq.itxrcp, freq, c.gcdkm, c.amind)
+    # .....SELECT OPTIMUM AT TRANSMITTER/RECEIVER ENDS
+    seltxr(c.reflx, c.losx, c.lpath, c.frq.itxrcp, c.gcdkm, c.amind, c.info)
+    # .....DO MODE CALCULATIONS
+    lngpat(c.layers, c.lpath, c.losx, c.reflx, c.muf, c.allm, c.sigd,
+           c.anois, c.cant, freq, c.gcd, int(c.frq.itxrcp[2]))
 
 
 def _luf_found(c, ifx: int, pluf) -> None:
