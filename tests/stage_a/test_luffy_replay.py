@@ -35,16 +35,22 @@ is between "slot 1" and "the padding slot 0".  Fixed in ``allmodestate.py``.
 
 THE RESIDUAL
 ------------
-Measured over 10 decks x 24 hours x 262 columns = 62,880 cells: **62,033
-bit-exact (98.65%)**, per deck between 100.0% (lonpar_m01_s100_v30) and 95.90%
+Measured over 16 decks x 24 hours x 262 columns = 100,608 cells: **99,395
+bit-exact (98.79%)**, per deck between 100.0% (lonpar_m01_s100_v30) and 95.90%
 (tanbel_m07_s160_v30).  Worst disagreement 5.4e-3 dB on a signal lower decile
 (latok row 22, DBLOSU(8): 6.919716 vs 6.925117), 7.8e-4 relative, 11,328
 floored ULP.  Median mismatch 4 ULP.
 
+**The long path is no worse than the short path.**  The six IPFLAG-200 decks
+land between 98.36% and 99.81%, inside the short path's own spread -- so
+joining two independently-chosen rays across 11,000 to 21,700 km accumulates
+no more error than sweeping hop counts over one ionosphere does.
+
 **No discrete decision ever differs.**  NHP -- the hop count of the mode
-RELBIL picked -- and JMODE are bit-exact in all 62,880 cells across all ten
-decks, so the mode selection, the hop sweep and the layer choice all agree;
-only the numbers attached to the chosen mode move.  That is asserted below,
+RELBIL picked -- and JMODE are bit-exact in all 5,376 discrete cells across
+all sixteen decks, 2,016 of them long-path, so the mode selection, the hop
+sweep, the layer choice and SELTXR's ray choice at both ends all agree; only
+the numbers attached to the chosen mode move.  That is asserted below,
 because a regression that flipped a branch would show up there first and is
 qualitatively different from arithmetic noise.
 
@@ -319,10 +325,16 @@ def test_luffy_replay_vs_oracle(deck):
 @pytest.mark.skipif(not DECKS, reason="oracle dump missing")
 def test_the_capture_covers_the_branches_that_matter():
     """A replay is only worth its coverage.  These are the decisions inside
-    LUFFY that the ten decks have to exercise between them."""
+    LUFFY that the captured decks have to exercise between them.
+
+    ``short_path`` and ``long_path`` are the two that would be easiest to lose
+    by accident: the runner clears every CSV before it writes, so capturing a
+    subset of decks silently deletes the rest, and a replay over short-path
+    decks alone would still pass while validating half the driver.
+    """
     seen = {"one_area": 0, "three_areas": 0, "five_areas": 0,
             "mspec_121": 0, "mspec_0": 0, "method_25": 0,
-            "empty_frequency_slot": 0}
+            "empty_frequency_slot": 0, "short_path": 0, "long_path": 0}
     for deck in DECKS:
         v = _rows(DUMPS / f"{deck}_in.csv")[0]
         seen["one_area"] += int(v["kfx"]) == 1
@@ -333,5 +345,7 @@ def test_the_capture_covers_the_branches_that_matter():
         seen["method_25"] += int(v["method"]) == 25
         seen["empty_frequency_slot"] += any(
             v[f"frel{i:02d}"] <= 0.0 for i in range(1, 12))
+        seen["short_path"] += int(v["ipflag"]) in (100, 300)
+        seen["long_path"] += int(v["ipflag"]) in (200, 400)
     for arm, n in seen.items():
         assert n, f"no deck exercises {arm} ({seen})"
