@@ -35,6 +35,11 @@ printed, and asserted rare — never waved through with a tolerance.
    const-propagated local) into multiply-by-reciprocal *despite*
    `--prec-div=true` — 1 ULP wrong, and ill-conditioned callers amplify it.
    Plain `/` is fine only when the denominator is a genuinely runtime value.
+   The hazard is identical in binary64: a REAL*8 region dividing by a
+   constant needs `div64` (`__ddiv_rn`). Note also that a promoted binary32
+   literal (`(double)4.34294f`) and a true binary64 one (`4.34294`) are
+   DIFFERENT numbers — GENOIS uses both, in different expressions, and they
+   must stay distinct.
 5. Fortran `IFIX`/`INT` truncation is C `(int)x`. For anything subtler
    (NINT, MOD on negatives), mirror the exact expression Stage A wrote.
 6. Expression shape is part of the answer: keep Stage A's association order

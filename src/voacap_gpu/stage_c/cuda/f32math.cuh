@@ -33,6 +33,13 @@ __device__ __forceinline__ float div32(float a, float b) {
     return __fdiv_rn(a, b);
 }
 
+// The SAME hazard exists in binary64, and GENOIS's REAL*8 accumulators hit
+// it (``DXX / 4.34294d0``).  Use this wherever a REAL*8 region divides by a
+// constant, exactly as div32 is used in the REAL*4 ones.
+__device__ __forceinline__ double div64(double a, double b) {
+    return __ddiv_rn(a, b);
+}
+
 // REAL*4 x**y with a REAL exponent (gfortran emits powf).  Both operands are
 // already float here, mirroring f32math.pow32's round-to-f32-first rule.
 __device__ __forceinline__ float pow32(float x, float y) {
