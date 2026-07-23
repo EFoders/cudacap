@@ -1,0 +1,23 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_gmloss.f + cversn + gmloss + seltxr + settxr + gain
+         + prbmuf   (all callees linked real, not stubbed)
+inputs: 87 columns — SETTXR's grid (imported from gen_settxr_cases,
+        so the two stay in step) plus SELTXR's DELOPT, GMIN, YMIN
+        and the /INFORM/ mask.  The /REFLX/ ray tables are generated
+        from a base and a step per column per control area.
+outputs: 314 columns — /ZON/ 21 fields at slots 1 and 7 (the preset
+         loop's ends), TXRGML x 45 x 2, LTXRGM x 2, and GML/FHP x 45
+         x 2 control areas
+NOTE: TXRGML is preset to -8888 because GMLOSS does NOT preset it.
+      /ZON/ is preset to -9999 for the same reason in reverse: the
+      preset loop is most of what GMLOSS actually accomplishes.
+NOTE: INFO bit 4 is carried deliberately.  It makes SELTXR run its
+      whole selection twice, and the second pass inherits XHPM and
+      YHPM from the first, so the diagnostic flag can change the
+      selected ray.  Both settings are in the grid.
+NOTE: held out of the grid, on top of SETTXR's own exclusions —
+      IAFTXR at exactly 45 with every ray existing and none clearing
+      AMIND drives SELTXR's find-first search to ray 46, which the
+      Fortran reads out of the column.  NFILL is capped at 44.
+generated: 2026-07-23T12:06:46Z
