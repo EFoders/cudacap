@@ -22,6 +22,17 @@ __device__ __forceinline__ float log10_32(float x) { return (float)log10((double
 __device__ __forceinline__ float sqrt32(float x) { return (float)sqrt((double)x); }
 __device__ __forceinline__ float exp32(float x)  { return (float)exp((double)x); }
 
+// Correctly rounded f32 division THAT SURVIVES CONSTANT FOLDING.  NVRTC
+// strength-reduces ``x / 6370.0f`` (any compile-time-constant denominator,
+// including via a const-propagated local) into multiply-by-reciprocal even
+// under --prec-div=true, a 1-ULP error that conditioning can amplify.
+// Rule: every division whose denominator is a literal, a VC_* constant, or
+// anything the compiler can see as constant goes through div32.  Divisions
+// by genuinely runtime values may use plain ``/``.
+__device__ __forceinline__ float div32(float a, float b) {
+    return __fdiv_rn(a, b);
+}
+
 // REAL*4 x**y with a REAL exponent (gfortran emits powf).  Both operands are
 // already float here, mirroring f32math.pow32's round-to-f32-first rule.
 __device__ __forceinline__ float pow32(float x, float y) {

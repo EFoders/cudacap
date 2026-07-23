@@ -30,6 +30,11 @@ printed, and asserted rare — never waved through with a tolerance.
    never `cosf`/`__cosf`/`powf`.
 4. **Python `max`/`min` become `pymax`/`pymin`** (NaN: first argument wins),
    never `fmaxf`/`fminf`.
+4b. **Division by a constant goes through `div32`.** NVRTC strength-reduces
+   `x / 6370.0f` (any compile-time-constant denominator, even through a
+   const-propagated local) into multiply-by-reciprocal *despite*
+   `--prec-div=true` — 1 ULP wrong, and ill-conditioned callers amplify it.
+   Plain `/` is fine only when the denominator is a genuinely runtime value.
 5. Fortran `IFIX`/`INT` truncation is C `(int)x`. For anything subtler
    (NINT, MOD on negatives), mirror the exact expression Stage A wrote.
 6. Expression shape is part of the answer: keep Stage A's association order

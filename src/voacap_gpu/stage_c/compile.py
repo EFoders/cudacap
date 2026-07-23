@@ -15,11 +15,28 @@ program.  ``tests/stage_c/test_f32math.py`` carries a statistical tripwire
 for it.  Never compile a Stage C source through a bare ``cp.RawModule``.
 """
 
+import hashlib
 import pathlib
 
 import cupy as cp
 
 CUDA_DIR = pathlib.Path(__file__).resolve().parent / "cuda"
+
+
+def _header_fingerprint():
+    """One hash over every header, so editing a .cuh invalidates the cache.
+
+    CuPy keys its kernel cache on the SOURCE STRING only — #include contents
+    are resolved by NVRTC and never hashed, so an edited header would keep
+    serving the stale binary.  Injecting this fingerprint as a comment makes
+    the cache key move with the headers.  Content-hashed (not mtime) so a
+    checkout/branch switch that restores identical bytes still hits.
+    """
+    h = hashlib.sha1()
+    for p in sorted(CUDA_DIR.glob("*.cuh")):
+        h.update(p.name.encode())
+        h.update(p.read_bytes())
+    return h.hexdigest()
 
 # --fmad=false: no FMA contraction (intermediate rounding must happen).
 # --prec-div / --prec-sqrt: IEEE-correct f32 division and sqrt (these are the
@@ -36,4 +53,5 @@ def load(source: str, extra_opts: tuple = ()) -> cp.RawModule:
     or driver kernels).  CuPy caches the build keyed on source+options, so
     repeated test runs pay compilation once.
     """
-    return cp.RawModule(code=source, options=STRICT_OPTS + tuple(extra_opts))
+    stamped = f"// headers: {_header_fingerprint()}\n" + source
+    return cp.RawModule(code=stamped, options=STRICT_OPTS + tuple(extra_opts))
