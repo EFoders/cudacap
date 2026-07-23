@@ -81,7 +81,8 @@ from voacap_gpu.stage_a.antennastate import CantennaState
 from voacap_gpu.stage_a.f32math import F32
 from voacap_gpu.stage_a.readant import read_antenna
 from voacap_gpu.stage_b.gain import BatchedCantenna
-from voacap_gpu.stage_b.regmod import FIELDS, RegmodError, regmod_batch
+from voacap_gpu.stage_b.regmod import (FIELDS, RegmodError, regmod_batch,
+                                       reset_graph_cache)
 
 from tests.stage_a.dumputil import ANTENNAS_DIR, load_dump
 
@@ -456,3 +457,73 @@ def test_cuda_matches_cpu():
         err = np.abs(a.astype(np.float64) - b.astype(np.float64))
         assert ulp.max() <= ulp_bar, f"{name} worst {ulp.max():.1f} ULP"
         assert err.max() <= abs_bar, f"{name} worst {err.max():.3g} absolute"
+
+
+def _raw(t):
+    """A tensor as raw bits, so a NaN compares equal to itself.
+
+    REGMOD manufactures NaN on purpose — a dead mode slot has a negative
+    ``FV + fH`` and ``torch.pow`` yields NaN there, which the select discards —
+    so a value comparison would report those cells as "different" on every run
+    and a graph that replayed against a stale buffer could hide behind it.
+    """
+    return t.view(torch.int32) if t.dtype == torch.float32 else t
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or DUMP is None,
+                    reason="no CUDA")
+def test_the_cuda_graph_path_is_bit_for_bit_the_eager_path():
+    """Capture-and-replay is the same kernels in the same order, so anything
+    other than bit-for-bit means the capture is not running what eager runs.
+
+    ORDER IS PART OF THE CLAIM, so both directions are checked.  Capture is a
+    side effect that happens on first use: a graph built from the eager path's
+    warm allocator state and one built cold have to give the same answer, and
+    a replay after an intervening eager call has to be unaffected by it.  The
+    full oracle dump goes in, all 262 lanes and all 20 fields.
+    """
+    args, _, _ = _batch("cuda")
+    reset_graph_cache()
+    graph_cold = regmod_batch(**args, use_cuda_graph=True)
+    eager = regmod_batch(**args, use_cuda_graph=False)
+    graph_warm = regmod_batch(**args, use_cuda_graph=True)
+    reset_graph_cache()
+    eager_first = regmod_batch(**args, use_cuda_graph=False)
+    graph_after = regmod_batch(**args, use_cuda_graph=True)
+    for label, got in (("graph before eager", graph_cold),
+                       ("graph after eager", graph_warm),
+                       ("eager, second time", eager_first),
+                       ("graph, recaptured", graph_after)):
+        for name in FIELDS:
+            assert torch.equal(_raw(eager[name]), _raw(got[name])), \
+                f"{name} differs between the eager path and {label}"
+    reset_graph_cache()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or DUMP is None,
+                    reason="no CUDA")
+def test_the_graph_path_still_refuses_a_bad_state():
+    """The two Fortran STOPs survive the split, and they have to.
+
+    Both are host syncs, which is illegal inside a capture: the frequency test
+    moved ahead of the captured region and the MUFday test moved behind it,
+    counting offending lanes into a tensor the caller reads back.  If either
+    had simply been dropped to make the capture legal, a bad batch would come
+    back as NaN — which is the one failure mode this port cannot afford.
+    """
+    args, _, _ = _batch("cuda")
+    bad = dict(args)
+    bad["muf"] = dict(args["muf"])
+    bad["muf"]["ymuf"] = torch.zeros_like(args["muf"]["ymuf"])
+    bad["muf"]["fvmuf"] = torch.ones_like(args["muf"]["fvmuf"])
+    with pytest.raises(RegmodError, match="MUFday"):
+        regmod_batch(**bad, use_cuda_graph=True)
+
+    freq = args["freq"].clone()
+    live = args["modes"]["hpmod"][1:7].max(dim=0).values > 0.0
+    freq[int(torch.nonzero(live)[0])] = 0.0
+    with pytest.raises(RegmodError, match="frequency"):
+        regmod_batch(**dict(args, freq=freq), use_cuda_graph=True)
+    # the process is still usable: neither refusal went through a capture
+    regmod_batch(**args, use_cuda_graph=True)
+    reset_graph_cache()
