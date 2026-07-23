@@ -92,6 +92,46 @@ def _stuck(name, max_steps):
             "than a batch that needs more room")
 
 
+def plan_buckets(key, nbucket):
+    """Group lanes by `key` so a lockstep run pays each group's OWN length.
+
+    Returns ``(order, bounds)``: `order` is a permutation of the lane indices
+    sorted by key, and `bounds` are the split points, so
+    ``order[bounds[i]:bounds[i+1]]`` is one bucket.  Reordering is exact -- it
+    is a permutation, and `restore_order` undoes it -- so nothing about the
+    answer changes, only how long the batch waits for its slowest member.
+
+    WHETHER THIS PAYS DEPENDS ENTIRELY ON THE KEY, and for FINDF the honest
+    answer today is "not yet".  Its step count is determined EXACTLY by the
+    number of rays a lane finds (measured correlation 1.000), and that is not
+    known until the lane has run.  The best a-priori predictor to hand,
+    whether an F1 ledge exists, correlates only 0.403.  Perfect 8-way
+    bucketing would save 36% of lane-steps on the benchmark batch; a 0.4
+    correlation delivers a fraction of that, against the cost of a sort, a
+    gather and scatter of every state buffer, and a separate CUDA-graph
+    capture per bucket.
+
+    It becomes worth using the moment a caller HAS a good key, and a driver
+    will: consecutive operating frequencies at the same circuit and hour find
+    almost the same number of rays, so the previous frequency's IAFTXR is a
+    strong predictor of this one's.  That is why this lives here now rather
+    than being written when the driver arrives -- and why it is opt-in.
+    """
+    if nbucket < 1:
+        raise ValueError(f"nbucket must be >= 1, got {nbucket}")
+    order = torch.argsort(key)
+    n = key.shape[0]
+    edges = [round(i * n / nbucket) for i in range(nbucket + 1)]
+    return order, edges
+
+
+def restore_order(values, order):
+    """Undo `plan_buckets`' permutation along the LAST axis."""
+    inv = torch.empty_like(order)
+    inv[order] = torch.arange(order.shape[0], device=order.device)
+    return values[..., inv]
+
+
 def gather_rows(arr, idx):
     """``arr[idx[lane], lane]`` for every lane -- the per-lane row pick.
 
