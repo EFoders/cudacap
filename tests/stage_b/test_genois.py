@@ -254,6 +254,49 @@ def test_galactic_noise_is_dropped_below_the_f2_critical(device):
 
 @pytest.mark.skipif(DUMP is None, reason="oracle dump missing")
 @pytest.mark.parametrize("device", DEVICES)
+def test_fi3_alone_moves_every_output(device):
+    """FI3 is what stops GENOIS being shared across transmitters -- pin it.
+
+    Every other input is the receiver's, the run's or the frequency's, so it
+    is tempting to conclude an area run may evaluate GENOIS once per (grid
+    point, hour, frequency) and reuse it for all 100 transmitters.  It may
+    not.  FI3 is FI(3,KFX), the F2 critical at the CONTROLLING SAMPLE AREA --
+    a point on the great-circle path, laid out from the transmitter along the
+    bearing (geom.for) -- so it moves with the circuit even when the receiver
+    does not.
+
+    This holds every other input fixed and varies FI3 across the operating
+    frequency.  If only MODE_N2 moved, sharing the numeric outputs would still
+    be defensible; the assertion is that RCNSE and all five spread terms move
+    too, because dropping the galactic component removes AU2/VU2/AL2/VL2 from
+    the Spaulding sums that produce them.  ZNOISE is the one field that does
+    not move: it is a function of the NOISE card alone.
+    """
+    st = redmap(COEFFS_DIR, "CCIR", 6, F32(100.0))
+    fi3 = np.array([4.0, 15.0], dtype=np.float32)   # below then above 10 MHz
+    n = 2
+    t = lambda a: torch.as_tensor(a, device=device)  # noqa: E731
+    f = lambda v: t(np.full(n, v, np.float32))       # noqa: E731
+    out = genois_batch(
+        t(st.fam), t(st.dud), t(np.zeros(n, bool)),
+        t(np.full(n, 3, np.int64)), t(np.full(n, 3, np.int64)),
+        f(70.0), f(68.0), f(10.0), f(10.0), f(0.5), f(10.0),
+        t(np.full(n, -2, np.int64)), t(fi3), _empty_cantenna(device))
+    assert out["mode_n2"].cpu().numpy().tolist() == [1, 0]
+    for name in ("rcnse", "du", "dl", "sigm", "sygu", "sygl", "gnos"):
+        v = out[name].cpu().numpy()
+        assert v[0] != v[1], (
+            f"{name} is unchanged by FI3 ({v.tolist()}) -- if this ever "
+            "becomes true of every field, GENOIS really would be shareable "
+            "across transmitters and the docstring needs revisiting")
+    # the two genuinely circuit-independent fields, for contrast
+    for name in ("znoise", "xnoise", "eff"):
+        v = out[name].cpu().numpy()
+        assert v[0] == v[1], f"{name} should not depend on FI3"
+
+
+@pytest.mark.skipif(DUMP is None, reason="oracle dump missing")
+@pytest.mark.parametrize("device", DEVICES)
 def test_no_data_base_uses_the_fixed_deciles(device):
     """F2D(1,1,1) < 0 skips GENFAM: the atmospheric level vanishes but its
     deciles are still the fixed 9/7 dB, so the spread does not collapse.

@@ -49,6 +49,55 @@ The transcendentals are evaluated in float64 and rounded once to float32,
 matching Stage A's ``f32math`` rather than torch's own f32 libm; that is what
 carries the bit-exactness across, and it also makes CPU and CUDA agree.
 
+WHAT THIS IS KEYED BY -- AND WHY IT IS **NOT** SHAREABLE ACROSS TRANSMITTERS.
+
+It looks like it should be.  Every visible input is either the receiver's
+(RLAT, and ANOIS1's ATNU/ATNY/CC/TM/KJ/JK), the run's (FAM, DUD, NODATA, the
+NOISE card) or the frequency's, so the natural conclusion is that GENOIS is
+one evaluation per (grid point, hour, frequency) and an area run over 100
+transmitters is repeating each of them 100 times.  ``anois1.py`` documents
+exactly that sharing for ANOIS1, where it is true.
+
+**It is false here, and FI3 is why.**  ``fi3`` is FI(3,KFX), the F2 critical
+frequency at the CONTROLLING SAMPLE AREA, and a sample area is a point on the
+great-circle path, not the receiver.  geom.for lays them out from the
+transmitter along the bearing BTR -- for a path over 4000 km, five of them at
+1000 km, 2000 km, the midpoint, GCD-2000 km and GCD-1000 km -- and ionset.for
+then picks KFX (1, 2 or 3 by path length) and shuffles FI(3,KFX) to hold the
+F2 critical of the area nearest the RECEIVER END.  Nearest, not at: it sits
+2000 km back down the path for a long circuit and at the path MIDPOINT for a
+short one.  Move the transmitter and that point moves, so foF2 there changes,
+so ``freq <= fi3`` can flip.
+
+When it flips, the galactic component is dropped entirely -- and every output
+except ZNOISE moves with it, because AU2/VU2/AL2/VL2 feed the Spaulding sums
+that produce RCNSE, DU, DL and all three sigmas.  There is no small corner of
+the answer that survives; sharing GENOIS across transmitters would be wrong
+almost everywhere the F2 critical brackets the operating frequency, which for
+an HF prediction is the interesting part of the band.
+
+So the line falls INSIDE this routine, at the ``blocked`` mask:
+
+* **Above it** -- the two GENFAM calls and the local-time interpolation that
+  give ATNOS/DUA/DLA/SMA/SUA/SLA -- everything is keyed by (grid point, hour,
+  frequency) and is genuinely transmitter-independent.  That is most of the
+  table lookup and both of the tabulated-polynomial evaluations.
+* **At and below it** -- the galactic block, the Spaulding/Caruana
+  combination and the prediction errors -- everything is additionally keyed by
+  the CIRCUIT, through FI(3,KFX).
+
+Two smaller pieces are shareable further than the routine as a whole, for the
+record: XNOISE and ZNOISE (the man-made component) depend only on the NOISE
+card and the frequency, not on position at all, and EFF depends only on the
+frequency and the receive-antenna entry -- AEFF is a per-frequency efficiency
+column with no bearing in it.
+
+None of this is exploited by an API change here.  Splitting GENOIS at the
+``blocked`` mask to share its first half would mean a second entry point and a
+second set of oracle bars for a routine whose first half is a handful of
+multiply-adds, and the arithmetic below the split is what actually costs.  The
+sharing that is worth having is ANOIS1's, and that one is whole-routine.
+
 The receiver antenna efficiency is fetched from GAIN here too -- incidentally
 rather than by right, because this is the one routine per frequency guaranteed
 to run.  It is returned as a single (N,) tensor; the caller broadcasts it into
@@ -152,7 +201,10 @@ def genois_batch(fam, dud, nodata, kj, jk, atnu, atny, cc, tm,
     freq:   (N,) float32 MHz.
     noise:  (N,) int64 NOISE card: > 0 a 3 MHz level in dB below 1 W,
             0 the -164 default, < 0 a CCIR environment index.
-    fi3:    (N,) float32 FI(3,KFX), the F2 critical frequency.
+    fi3:    (N,) float32 FI(3,KFX), the F2 critical frequency at the
+            controlling sample area.  THE ONE TRANSMITTER-DEPENDENT INPUT --
+            the sample area is a point on the path, so this is what stops the
+            result being shareable across circuits; see the module docstring.
     cant:   ``BatchedCantenna``; entry ITR=2 is the receiver.
     nyear:  the /ALPHA/ year string; ' 2089' is refused.
 

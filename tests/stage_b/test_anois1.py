@@ -218,6 +218,38 @@ def test_shared_map_matches_per_lane_map(device):
         assert torch.equal(a[name], b[name]), f"[{device}] {name} differs"
 
 
+@pytest.mark.skipif(DUMP is None, reason="oracle dump missing")
+@pytest.mark.parametrize("device", DEVICES)
+def test_lanes_are_independent(device):
+    """A lane's answer must not depend on which other lanes share its batch.
+
+    Obvious from the source -- every operation here is elementwise and NOTHING
+    reduces across the lane axis -- and precisely because it is obvious it is
+    the kind of thing a future edit breaks without anyone looking.  It is also
+    the premise the work-sharing in ``stage_b.dedupe`` rests on: ANOIS1 is
+    keyed by (receiver site, receiver mean time), so a driver may evaluate the
+    distinct sites as a smaller batch and read the answers back, and that is
+    only sound if a smaller batch computes the same bits.
+
+    Asserted BITWISE on every field, on an arbitrary scattered subset rather
+    than a prefix, so a reduction that happened to be a no-op at the edges
+    would still show.
+    """
+    cols, _, _ = _inputs()
+    n = len(cols["gmtr"])
+    pick = np.arange(3, n, 7)
+    assert len(pick) > 10
+    full = _run(cols, device)
+    sub = _run({k: (v[..., pick] if k in ("fakp", "fakabp") else v[pick])
+                for k, v in cols.items()}, device)
+    for name in full:
+        got = sub[name]
+        exp = full[name][torch.as_tensor(pick, device=got.device)]
+        assert torch.equal(got, exp), (
+            f"[{device}] {name} depends on the batch it is evaluated in: "
+            f"{int((got != exp).sum())}/{len(pick)} lanes differ")
+
+
 def test_kj8_limits_vs_stage_a():
     """The LM=15/LN=10 arm, against Stage A -- the WEAKER claim.
 

@@ -40,6 +40,43 @@ a stale value this port could not reproduce even if it wanted to, and one no
 caller reads (the Stage A oracle test skips those four fields for exactly
 that reason).  The dump does reach this arm: 9 of its 189 cases.
 
+WHAT THIS IS KEYED BY: (RECEIVER SITE, RECEIVER MEAN TIME).  Nothing else.
+Read the signature and there is no transmitter in it and no frequency in it --
+GMTR, RLONG, RLONGD and RLAT are the receiver's, and FAKP/FAKABP/F2D111 are
+properties of the month and the coefficient set.  The Fortran agrees: LUFFY
+calls ANOIS1 once, before the frequency loop opens (luffy.for:104), and the
+only path-dependent thing computed before it -- SELMOD's controlling sample
+area -- is not among its inputs.
+
+That matters for an area run, where the "receiver" is the grid point.  A
+naive driver evaluates one lane per (circuit, hour), and with 100
+transmitters over the same grid, 99 of every 100 lanes recompute an answer
+bit-for-bit identical to one already in flight -- six 435-term Fourier sums
+each.  The honest key is (grid point, hour), so::
+
+    from voacap_gpu.stage_b.dedupe import (compose, unique_inverse,
+                                           representatives, take, expand)
+
+    keys = compose(grid_index, hour_index)       # both (N,) int64
+    uniq, inv = unique_inverse(keys)
+    rep = representatives(inv, len(uniq))        # (U,) lanes to actually run
+
+    args = take({"gmtr": gmtr, "rlong": rlong, "rlongd": rlongd,
+                 "rlat": rlat, "f2d111": f2d111}, rep, n_lanes=len(inv))
+    compact = anois1_batch(fakp, fakabp, args["f2d111"], args["gmtr"],
+                           args["rlong"], args["rlongd"], args["rlat"])
+    out = expand(compact, inv)                   # back to N lanes, exactly
+
+``expand`` is an index read, so ``out`` is bit-identical to calling
+``anois1_batch`` on all N lanes -- see ``tests/stage_b/test_dedupe.py``, which
+asserts that on this routine's own oracle inputs.  FAKP/FAKABP go through
+unchanged in the shared (29,16,6) form; in the per-lane (29,16,6,N) form they
+need ``take(..., dim=-1)`` as well.
+
+GENOIS IS NOT SHAREABLE THE SAME WAY, despite also being transmitter-free in
+appearance -- see the matching section in ``genois.py`` for where the line
+falls and why.
+
 State: the Fortran writes COMMON /ANOIS/.  This returns a dict instead, the
 Stage B convention (see ``findf_batch``).
 
