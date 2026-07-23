@@ -1,0 +1,20 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_gettop.f + gettop
+inputs: 9 columns — delopt,freq,dikm,hi1,hi2,hi3,fi1,fi2,fi3.
+        HI/FI are the E layer only, HI(1,jf)/FI(1,jf) for the three
+        control areas.  DELOPT is injected rather than left at
+        blkdat's 3 degrees so the grid can reach the sin^2 clamp.
+outputs: GMKM, the over-the-top distance in km (0 = none qualifies)
+NOTE: the generator emulates GETTOP's float32 arithmetic so it can
+      SEARCH for inputs that land each boundary on exactly zero.
+      At physical frequencies the two 0.001 MHz slack boundaries
+      cannot be hit exactly (float32 0.001 is an odd multiple of
+      2^-33 and FREQ-FP is a multiple of ulp(FP)), so those exact
+      cases sit at kilohertz-scale FP instead; both sides are pinned
+      at physical scale by stepping FREQ one ULP at a time.
+NOTE: the sin^2 clamp at 0.9999 is UNREACHABLE with real geometry
+      (DELOPT 3 degrees, E layer near 110 km gives sin^2 = 0.964).
+      Probed with DELOPT 0 / near-zero heights and with negative
+      heights, where without the clamp SQRT would take a negative.
+generated: 2026-07-22T20:30:03Z

@@ -1,0 +1,14 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -g -O2 -std=legacy -fallow-argument-mismatch -w -ffixed-line-length-none
+sources: dump_lngabs.f + babs + tabs + convh
+inputs: 10 columns — freq,gyz3,acav,del,hp,df,dm,gd,phe,ray.
+        FREQ/GYZ(3)/ACAV are injected into the commons; DEL and HP
+        are shared by all three routines exactly as LNGPAT shares
+        them.  /CON/ is DATA-initialised in the driver from blkdat's
+        own values rather than linking blkdat for two constants.
+outputs: AF (BABS), AM (TABS), CH and PTOT (CONVH)
+NOTE: FREQ+GYZ(3) is never negative (powf of a negative base with a
+      fractional exponent is NaN) and DEL stays below PIO2 (where
+      PSI underflows to zero and XMHOP is infinite).  RAY >= 0 and
+      DEL inside a right angle keep CONVH's ALOG10 argument positive.
+generated: 2026-07-22T20:16:48Z
