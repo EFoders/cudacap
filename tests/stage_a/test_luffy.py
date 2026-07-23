@@ -60,16 +60,16 @@ def test_the_long_path_builds_an_ionosphere_at_BOTH_ends():
     belongs to which end, where the short path leaves it alone."""
     for ipfg in (200, 400):
         c = _plausible()
-        c.layers.kfx = 4
+        c.layers.kfx = 3    # IONSET only ever sets 1, 2 or 3
         c.frq.jmode = 2
         k, xmdl = _select_area(c, ipfg)
         assert c.jlong == 1, "the long-path flag"
         assert c.frq.itxrcp[1] == 1, "transmitter end is area 1"
-        assert c.frq.itxrcp[2] == 4 and k == 4, "receiver end is KFX"
+        assert c.frq.itxrcp[2] == 3 and k == 3, "receiver end is KFX"
         assert xmdl == "L"
 
     c = _plausible()
-    c.layers.kfx = 4
+    c.layers.kfx = 3
     c.frq.jmode = 2
     k, xmdl = _select_area(c, 100)
     assert c.jlong == -1 and k == 2, "the short path stays on SELMOD's area"

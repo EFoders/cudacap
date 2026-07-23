@@ -24,14 +24,23 @@ DECKS="$REPO_ROOT/golden/p2p/matrix/decks"
 
 [[ -d "$BUILD" ]] || { echo "oracle build tree missing — run tools/oracle/build_oracle.sh" >&2; exit 1; }
 
-# Short-path decks only: the long-path branch is not ported, so a capture of
-# it would have nothing to compare against yet.
-# latok at 8809 km is included deliberately: METHOD 20 leaves MSPEC at 0, so
-# it stays short-path despite being past the smoothing distance.
-DEFAULT_DECKS="lonpar_m01_s100_v30 lonpar_m07_s15_v30 lonpar_m10_s160_v30
-               tanbel_m01_s100_v30 tanbel_m07_s160_v30 tanbel_m01_s100_v25
-               fbahel_m01_s100_v30 fbahel_m07_s15_v30 fbahel_m01_s100_v20
-               latok_m01_s100_v20"
+# Both models, since both are now ported.  NOT included: any deck that hits
+# the MSPEC-121 smoothing recycle between 7000 and 10000 km, which still
+# refuses -- that is latok and toksyd on METHOD 30.
+#
+# latok_m01_s100_v20 at 8809 km IS here, deliberately: METHOD 20 leaves MSPEC
+# at 0, so it stays short-path despite being past the smoothing distance.
+#
+# The run CLEARS every CSV in the destination first, so this list has to name
+# every deck the replay test expects -- capturing a subset deletes the rest.
+SHORT_DECKS="lonpar_m01_s100_v30 lonpar_m07_s15_v30 lonpar_m10_s160_v30
+             tanbel_m01_s100_v30 tanbel_m07_s160_v30 tanbel_m01_s100_v25
+             fbahel_m01_s100_v30 fbahel_m07_s15_v30 fbahel_m01_s100_v20
+             latok_m01_s100_v20"
+# Past 10000 km, where HFMUFS forces IPFG 200 outright.
+LONG_DECKS="sydstg_m01_s100_v30 sydstg_m07_s160_v30 sydstg_m10_s15_v30
+            lonakl_m01_s100_v30 lonakl_m07_s15_v30 lonakl_m01_s100_v30_long"
+DEFAULT_DECKS="$SHORT_DECKS $LONG_DECKS"
 DECK_LIST=("$@")
 # shellcheck disable=SC2206
 [[ ${#DECK_LIST[@]} -eq 0 ]] && DECK_LIST=($DEFAULT_DECKS)

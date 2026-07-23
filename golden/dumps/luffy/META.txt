@@ -5,7 +5,7 @@ method: LUFFY shimmed into the real voacapl (dump_luffy.f provides
         -- DECRED, REDMAP, GEOM, SANG, CURMUF, the hour loop -- is
         the stock program, so the captured state is what a real deck
         produces rather than what a case generator imagines.
-decks: lonpar_m01_s100_v30 lonpar_m07_s15_v30 lonpar_m10_s160_v30 tanbel_m01_s100_v30 tanbel_m07_s160_v30 tanbel_m01_s100_v25 fbahel_m01_s100_v30 fbahel_m07_s15_v30 fbahel_m01_s100_v20 latok_m01_s100_v20
+decks: lonpar_m01_s100_v30 lonpar_m07_s15_v30 lonpar_m10_s160_v30 tanbel_m01_s100_v30 tanbel_m07_s160_v30 tanbel_m01_s100_v25 fbahel_m01_s100_v30 fbahel_m07_s15_v30 fbahel_m01_s100_v20 latok_m01_s100_v20 sydstg_m01_s100_v30 sydstg_m07_s160_v30 sydstg_m10_s15_v30 lonakl_m01_s100_v30 lonakl_m07_s15_v30 lonakl_m01_s100_v30_long
 files: <deck>_in.csv  = LUFFY's entry state, one row per call
        <deck>_out.csv = /SON/ + XLUF + JMODE at exit, same rows
        <deck>_ant.csv = /cantenna/ + /pantenna/, one row per antenna
@@ -14,4 +14,4 @@ files: <deck>_in.csv  = LUFFY's entry state, one row per call
 NOT captured: the coefficient maps (loaded
   Python-side by REDMAP, already validated), and /SON/
   MODE and MDL, which are CHARACTER and feed only the output tables.
-generated: 2026-07-22T19:59:17Z
+generated: 2026-07-23T12:19:35Z
