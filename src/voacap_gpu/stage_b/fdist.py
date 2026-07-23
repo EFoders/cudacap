@@ -27,22 +27,35 @@ different row per lane.  Lanes that are not writing this step scatter to row
 0 instead, which is never read: the mode slots are 1..6.  That keeps the store
 unconditional and avoids a masked scatter.
 
-PERFORMANCE, AND IT IS NOT THE HAPPY STORY THE REST OF STAGE B TELLS.  The
-batch converges in 130-256 lockstep steps, and each step issues about forty
-small kernels, so CUDA sits at ~290 ms REGARDLESS OF LANE COUNT -- it is
-entirely launch-bound.  Measured against the 30 us/lane scalar Stage A:
+PERFORMANCE: THE STEP IS TINY AND THERE ARE HUNDREDS OF THEM, so the naive
+version is bound by kernel launches rather than by arithmetic.  The batch
+converges in 130-256 lockstep steps and each step issues about forty small
+kernels; eagerly, that pins CUDA at ~300 ms REGARDLESS OF LANE COUNT.
 
-        180 lanes    290 ms   -- 50x SLOWER than just looping in Python
-     36,000 lanes    292 ms   --  4x faster
-    360,000 lanes    290 ms   -- 37x faster
+``_run_lockstep`` therefore captures one step into a CUDA GRAPH and replays
+it, turning forty launches per step into one.  Against the 30 us/lane scalar
+Stage A:
 
-So this only earns its place above roughly 40,000 lanes, which for area
-coverage is a 200x200 grid -- reachable, but it is a real caveat rather than a
-footnote, and a caller with a handful of circuits should use Stage A.  The
-lever is fusing the launches (CUDA graphs, or torch.compile over the step
-body), not restructuring the algorithm; amortising the completion check was
-tried first and moved the number by 1%, because synchronisation was never the
-cost.
+                    eager    graph          graph vs scalar
+        180 lanes   299 ms    46 ms   6.6x    8x slower
+      3,600 lanes   324 ms    54 ms   6.0x    2x faster
+     36,000 lanes   305 ms    54 ms   5.7x   20x faster
+    360,000 lanes   310 ms   112 ms   2.8x   96x faster
+
+The graph path is BIT-FOR-BIT identical to the eager one, which is asserted in
+the tests -- it is the same kernels in the same order, just launched once.
+
+Note the shape change as well as the speed: eager is flat in the lane count
+(launch-bound), graph is flat until 36,000 and then starts to grow (finally
+compute-bound, which is the regime it should be in).  The crossover against
+scalar drops from ~40,000 lanes to under 2,000, so this is now the right
+choice for anything bigger than a handful of circuits rather than for area
+grids only.
+
+torch.compile over the step body would be the other lever and is NOT available
+here: it needs Triton, which has no Windows build.  Amortising the completion
+check was tried before either and moved the number by 1% -- synchronisation
+was never the cost.
 
 Precision follows Stage A: float32, with SIN/COS/ATAN carrying the documented
 libm floor -- so unlike the profile chain this one cannot be bit-exact against
@@ -60,6 +73,62 @@ NRAY = 45                       # the ray table FINDF fills, 1-based
 _DONE = 230                     # the terminal label
 _MAX_STEPS = 600                # see the module docstring
 _EPS = 0.001
+_CHECK_EVERY = 16               # graph replays between completion checks
+
+
+def _run_lockstep(step, pc, buffers, use_cuda_graph):
+    """Drive `step` until every lane parks at the terminal label.
+
+    The eager path calls it in a Python loop, which is correct but issues
+    ~40 kernel launches per step and is what makes the routine launch-bound.
+    The CUDA-graph path records those launches once and replays the lot with
+    a single one.
+
+    CAPTURE HAS TO BE FED A COLD STATE.  CUDA graph capture requires a warmup
+    on a side stream, and the warmup genuinely RUNS the step -- so it advances
+    the very state machine being captured.  Every buffer is therefore cloned
+    beforehand and restored both after the warmup and after the capture; skip
+    either restore and the answer is silently the result of starting a few
+    steps in.
+    """
+    if not (use_cuda_graph and pc.is_cuda):
+        for _ in range(_MAX_STEPS):
+            if not bool((pc != _DONE).any()):
+                return
+            step()
+        raise RuntimeError(
+            f"FDIST lockstep did not converge in {_MAX_STEPS} steps; IH only "
+            "increases, so this means a transition is wrong")
+
+    saved = [b.clone() for b in buffers]
+
+    def _restore():
+        for buf, cold in zip(buffers, saved):
+            buf.copy_(cold)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            step()
+    torch.cuda.current_stream().wait_stream(stream)
+    _restore()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        step()
+    _restore()
+
+    # A lane parked at the terminal label is a no-op apart from touching the
+    # scratch sink, so over-replaying is harmless and the check can be rare.
+    for _ in range(0, _MAX_STEPS, _CHECK_EVERY):
+        for _ in range(_CHECK_EVERY):
+            graph.replay()
+        if not bool((pc != _DONE).any()):
+            return
+    raise RuntimeError(
+        f"FDIST lockstep did not converge in {_MAX_STEPS} steps; IH only "
+        "increases, so this means a transition is wrong")
 
 
 def _g(arr, idx):
@@ -68,7 +137,7 @@ def _g(arr, idx):
 
 
 def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
-                ghop, freq, amind):
+                ghop, freq, amind, use_cuda_graph=True):
     """Batched FDIST.
 
     The /REFLX/ arrays are (46, N) with row 0 unused, matching the Fortran's
@@ -81,7 +150,14 @@ def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
     lanes = torch.arange(n, device=dev)
     zero_i = torch.zeros(n, dtype=torch.long, device=dev)
 
-    dhopkm = ghop * _k(RZ, ghop)
+
+    # Hoisted out of the step: `_k` builds its scalar on the host, and a
+    # host-to-device copy is not capturable into a CUDA graph.  They are
+    # loop-invariant anyway.
+    k_rz, k_half = _k(RZ, ghop), _k(0.5, ghop)
+    k_pio2, k_r2d, k_d2r = _k(PIO2, ghop), _k(R2D, ghop), _k(D2R, ghop)
+
+    dhopkm = ghop * k_rz
     delmod = torch.zeros((NMODE + 1, n), dtype=_F32, device=dev)
     hpmod = torch.full((NMODE + 1, n), -1.0, dtype=_F32, device=dev)
     htmod = torch.zeros((NMODE + 1, n), dtype=_F32, device=dev)
@@ -97,26 +173,28 @@ def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
     il = zero_i.clone()
     dth2 = torch.zeros(n, dtype=_F32, device=dev)
 
-    for _ in range(_MAX_STEPS):
-        live = pc != _DONE
-        # This reads a GPU value and so synchronises every step.  Amortising
-        # it over 32 steps was tried and changed the runtime by 1% -- the
-        # cost here is kernel launches, not synchronisation, so the simple
-        # version stays.  See the performance note in the module docstring.
-        if not bool(live.any()):
-            break
 
+    def _step():
+        """Advance every lane by one Fortran statement, IN PLACE.
+
+        In place because this is what gets captured into a CUDA graph: a
+        replay re-runs the captured kernels against the captured buffer
+        addresses, so the state has to live in buffers that never move.
+        Rebinding ``pc = torch.where(...)`` would leave the graph updating a
+        tensor the Python name no longer refers to.
+        """
+        live = pc != _DONE
         at = {p: live & (pc == p) for p in
               (140, 145, 160, 165, 170, 175, 176, 180, 185, 215, 220, 305,
                315)}
         nxt = pc.clone()
 
         # 140: take the next mode slot
-        il = torch.where(at[140], il + 1, il)
+        il.copy_(torch.where(at[140], il + 1, il))
         nxt = torch.where(at[140], torch.full_like(pc, 145), nxt)
 
         # 145: take the next ray; give up past the end or at a dead entry
-        ih = torch.where(at[145], ih + 1, ih)
+        ih.copy_(torch.where(at[145], ih + 1, ih))
         ihc = ih.clamp(0, NRAY)                     # keep the gathers in range
         ih1 = (ih + 1).clamp(0, NRAY)
         past_end = at[145] & ((ih > NRAY - 1) | (_g(hpflx, ih1) <= 0))
@@ -156,11 +234,11 @@ def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
                         torch.full_like(pc, 180))), nxt)
 
         # 176: the hop lands exactly on the next ray -- step onto it
-        ih = torch.where(at[176], ih + 1, ih)
+        ih.copy_(torch.where(at[176], ih + 1, ih))
         nxt = torch.where(at[176], torch.full_like(pc, 165), nxt)
 
         # 180: too narrow a bracket to interpolate across
-        dth2 = torch.where(at[180], gd_ih1 - gd_ih, dth2)
+        dth2.copy_(torch.where(at[180], gd_ih1 - gd_ih, dth2))
         nxt = torch.where(at[180], torch.where(
             dth2.abs() - _EPS <= 0, torch.full_like(pc, 165),
             torch.full_like(pc, 185)), nxt)
@@ -178,7 +256,7 @@ def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
         gd_ih, gd_ih1 = _g(gdflx, ihc), _g(gdflx, ih1)
         dth = dhopkm - gd_ih
         safe = torch.where(dth2 == 0, torch.ones_like(dth2), dth2)
-        thet = _k(0.5, ghop) * dhopkm / _k(RZ, ghop)
+        thet = k_half * dhopkm / k_rz
         hp1, hp2 = _g(hpflx, ihc), _g(hpflx, ih1)
         ht1, ht2 = _g(htflx, ihc), _g(htflx, ih1)
         af1, af2 = _g(afflx, ihc), _g(afflx, ih1)
@@ -186,11 +264,11 @@ def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
         ht_i = ht1 + (ht2 - ht1) * dth / safe
         af_i = af1 + (af2 - af1) * dth / safe
         st = torch.sin(thet)
-        tanp = st / (1.0 - torch.cos(thet) + hp_i / _k(RZ, ghop))
+        tanp = st / (1.0 - torch.cos(thet) + hp_i / k_rz)
         phe = torch.atan(tanp)
-        del_i = (_k(PIO2, ghop) - phe - thet) * _k(R2D, ghop)
-        sphi = _k(RZ, ghop) * torch.cos(del_i * _k(D2R, ghop)) / (
-            _k(RZ, ghop) + ht_i)
+        del_i = (k_pio2 - phe - thet) * k_r2d
+        sphi = k_rz * torch.cos(del_i * k_d2r) / (
+            k_rz + ht_i)
         sphi = torch.clamp(1.0 - sphi * sphi, min=0.000001)
         fv_i = freq * torch.sqrt(sphi)
 
@@ -220,11 +298,11 @@ def fdist_batch(delfx, hpflx, htflx, gdflx, fvflx, afflx, imode, dmaxkm,
             il - NMODE < 0, torch.full_like(pc, 140),
             torch.full_like(pc, _DONE)), nxt)
 
-        pc = nxt
-    else:
-        raise RuntimeError(
-            f"FDIST lockstep did not converge in {_MAX_STEPS} steps; IH only "
-            "increases, so this means a transition is wrong")
+        pc.copy_(nxt)
+
+    _run_lockstep(_step, pc,
+                  (pc, ih, il, dth2, delmod, hpmod, htmod, fvmod, afmod,
+                   itmod), use_cuda_graph)
 
     # Clear the sink.  A lane that finished early keeps riding along and
     # keeps scattering into row 0, so how many times row 0 was written

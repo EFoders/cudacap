@@ -153,3 +153,24 @@ def test_cuda_matches_cpu():
         d = np.abs(a.astype(np.float64) - b.astype(np.float64))
         sp = np.spacing(np.maximum(np.abs(b), 1.0))
         assert (d / sp).max() <= ULP_BAR, f"{name} worst {(d / sp).max():.1f}"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or DUMP is None,
+                    reason="no CUDA")
+def test_the_cuda_graph_path_is_bit_for_bit_the_eager_path():
+    """Capturing the step and replaying it is the same kernels in the same
+    order, so there is no room for a numerical difference -- any would mean
+    the capture is not running what the eager loop runs.
+
+    It is also the test that catches the capture-specific trap: CUDA graph
+    capture needs a warmup, the warmup genuinely ADVANCES the state machine,
+    and forgetting to restore the buffers afterwards yields an answer that
+    starts a few steps in.  That failure is invisible on a batch whose lanes
+    all finish early and obvious here.
+    """
+    args, _ = _load("cuda")
+    eager = [t.cpu().numpy() for t in fdist_batch(*args, use_cuda_graph=False)]
+    graph = [t.cpu().numpy() for t in fdist_batch(*args, use_cuda_graph=True)]
+    names = ["delmod", "hpmod", "htmod", "fvmod", "afmod", "itmod", "nummod"]
+    for name, e, g in zip(names, eager, graph):
+        assert np.array_equal(e, g), f"{name} differs between eager and graph"
