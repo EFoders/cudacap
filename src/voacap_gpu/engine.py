@@ -22,6 +22,16 @@ WHAT IS SUPPORTED
   pointing along the great-circle path (OFFAZIM 0).  Antenna types 1-10, 12
   (method-of-moments synthesis) and 13 (azimuth-dependent, needs a real beam
   heading) raise ``NotImplementedError`` rather than returning wrong gains.
+* Antenna bearings: ``tx_bearing`` / ``rx_bearing`` set OFFAZIM (main-beam
+  azimuth minus GEOM's path bearing, ANTCALC's rule); default beam-along-path.
+* Prop-SL ``model`` toggle: ``'voacap'`` (CCIR + FPROB (1,1,1,0), validated).
+  ``'icepac'`` (URSI + FPROB (1,1,1,0.70)) RAISES -- FPROB is consumed and
+  PSC(4)=0.70 changes the answer, but no oracle deck validates that
+  combination (see ``_resolve_model``).
+* The Prop-SL parameter surface (:class:`System`): required S/N, reliability
+  percentile, man-made-noise category, transmit power, and the ``tx_gos`` /
+  ``rx_gos`` gain offsets (consumed); ``bandwidth`` / ``modulation`` are
+  advisory (the S/N-derivation front-end is not ported).
 * UTC hours 1..24.  ``hours`` given in local mean time at the transmitter is
   not exposed here (the Fortran's ITIM<0 path); pass UTC.
 
@@ -45,7 +55,7 @@ at the documented libm floor, then runs them through the kernel and shows the
 """
 
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -83,11 +93,32 @@ _GCDLNG = F32(10000.0)          # blkdat long-path threshold, km
 
 @dataclass
 class System:
-    """The SYSTEM and FPROB card values, defaulted to the golden decks'.
+    """The SYSTEM/FPROB card values plus the Prop-SL parameter surface.
 
-    ``fprob`` are the FPROB multipliers PSC applied to (E, F1, F2, Es) critical
-    frequencies; the deck value ``(1, 1, 1, 0)`` disables sporadic E.  The
-    stock VOACAP default (no FPROB card) is ``(1, 1, 1, 0.7)``.
+    Field names are the ones a Prop-SL / PropServer caller uses.  Each defaults
+    to the golden-deck SYSTEM/FPROB value, so a bare ``System()`` reproduces the
+    validated decks.
+
+    * ``required_snr``            RSN -- required S/N at the reliability
+      percentile, dB.  Prop-SL normally derives this from ``modulation`` and
+      ``bandwidth``; that derivation is NOT ported, so pass the number.
+    * ``required_reliability``    LUFP -- the reliability percentile (the
+      ``snrXXp`` percentile), percent.
+    * ``man_made_noise``          NOISE -- man-made noise at 3 MHz, -dBW
+      (145 residential, 150 rural, 164 quiet-rural, ...).
+    * ``power_kw``                transmitter power (ANTENNA-card PWRKW).
+    * ``tx_gos`` / ``rx_gos``     Prop-SL gain-offset, dB, added uniformly to
+      the transmit / receive antenna gain table (a real, consumed offset).
+    * ``fprob``                   the FPROB PSC multipliers on the (E, F1, F2,
+      Es) critical frequencies.  ``(1, 1, 1, 0)`` disables sporadic E (the
+      VOACAP deck value); ``(1, 1, 1, 0.7)`` is the ICEPAC value.  CONSUMED by
+      the ported EF1VAR/ESIND/F2VAR chain -- see the ``model`` note in
+      ``predict``'s docstring on why the 0.7 arm nonetheless refuses.
+    * ``bandwidth`` / ``modulation``  ADVISORY only.  VOACAP folds bandwidth
+      into the required S/N (a 1 Hz reference), and the modulation->S/N table
+      is a Prop-SL front-end concern, neither of which is ported.  Carried for
+      provenance; they do not change the computation.  Setting a non-default
+      ``bandwidth`` without adjusting ``required_snr`` is a caller error.
     """
 
     required_snr: float = 73.0          # RSN, dB (S/N at the reliability pctile)
@@ -97,7 +128,11 @@ class System:
     max_spread_db: float = 0.1          # DMP (multipath delay limit, ms)
     man_made_noise: float = 145.0       # NOISE, -dBW at 3 MHz (residential 145)
     power_kw: float = 1.0               # transmitter power (also on ANTENNA)
+    tx_gos: float = 0.0                 # Prop-SL transmit gain offset, dB
+    rx_gos: float = 0.0                 # Prop-SL receive gain offset, dB
     fprob: tuple = (1.0, 1.0, 1.0, 0.0)
+    bandwidth: float = None             # advisory (Hz); fold into required_snr
+    modulation: str = None              # advisory; Prop-SL derives S/N from it
 
     def _psc(self):
         amind = self.min_takeoff_deg if self.min_takeoff_deg > 0.0 else 3.0
@@ -109,32 +144,57 @@ class System:
 # Antennas
 # ---------------------------------------------------------------------------
 
-def isotropic_cant(power_kw=1.0) -> CantennaState:
+def offazim(path_bearing_deg, beam_bearing_deg) -> float:
+    """OFFAZIM: the angle a main beam sits off the great-circle path.
+
+    Exactly ANTCALC's rule (antcalc.for:271-272): ``OFFAZIM = path_azimuth -
+    beam_heading`` wrapped into ``[0, 360)``.  ``path_bearing_deg`` is the
+    azimuth of the path AT that end (GEOM's BTRD at the transmitter, BRTD at
+    the receiver); ``beam_bearing_deg`` is the antenna main-beam true azimuth.
+    """
+    return float(F32((F32(path_bearing_deg) - F32(beam_bearing_deg)) % F32(360.0)))
+
+
+def _finish_cant(cant, power_kw, tx_gos, rx_gos, off_tx, off_rx):
+    """Common tail: power, gain offsets, and OFFAZIM on a built /cantenna/."""
+    pkw = max(float(power_kw), 1e-6)
+    cant.pwrkw[1] = F32(power_kw)
+    cant.pwrdba[1] = F32(30.0 + 10.0 * np.log10(pkw))
+    if tx_gos:
+        cant.array[:, :, 1] = cant.array[:, :, 1] + F32(tx_gos)
+    if rx_gos:
+        cant.array[:, :, 2] = cant.array[:, :, 2] + F32(rx_gos)
+    cant.offazim[1] = F32(off_tx)
+    cant.offazim[2] = F32(off_rx)
+    return cant
+
+
+def isotropic_cant(power_kw=1.0, tx_gos=0.0, rx_gos=0.0,
+                   off_tx=0.0, off_rx=0.0) -> CantennaState:
     """A two-entry /cantenna/: 0 dBi isotropic TX (1) and RX (2).
 
-    ARRAY is zero (0 dBi at every frequency and elevation) and AEFF zero;
-    PWRDBA carries the transmitter power.  Enough for a sane, gain-neutral
-    prediction and for the pure-Python smoke path.
+    ARRAY is zero (0 dBi at every frequency and elevation, plus any gain
+    offset) and AEFF zero; PWRDBA carries the transmitter power.  ``off_tx`` /
+    ``off_rx`` are the OFFAZIM values (see :func:`offazim`) -- inert to an
+    isotropic gain but carried faithfully.
     """
     cant = CantennaState()
     for iat, itr in ((1, 1), (2, 2)):
         cant.iats[iat] = itr
         cant.xfqs[iat] = F32(0.0)
         cant.xfqe[iat] = F32(30.0)
-        cant.offazim[iat] = F32(0.0)
         cant.numants = max(cant.numants, iat)
-    pkw = max(float(power_kw), 1e-6)
-    cant.pwrkw[1] = F32(power_kw)
-    cant.pwrdba[1] = F32(30.0 + 10.0 * np.log10(pkw))
-    return cant
+    return _finish_cant(cant, power_kw, tx_gos, rx_gos, off_tx, off_rx)
 
 
-def cant_from_files(tx_path, rx_path, power_kw=1.0) -> CantennaState:
+def cant_from_files(tx_path, rx_path, power_kw=1.0, tx_gos=0.0, rx_gos=0.0,
+                    off_tx=0.0, off_rx=0.0) -> CantennaState:
     """Build a /cantenna/ from two type-14 ``.VOA`` sample files (TX, RX).
 
-    Installed exactly as READANT + ANTCALC would (``CantennaState.load_p2p``);
-    the beam is taken as pointing along the path (OFFAZIM 0), which is exact for
-    a type-14 azimuth-independent pattern.  Raises for non-tabulated types.
+    Installed exactly as READANT + ANTCALC would (``CantennaState.load_p2p``).
+    A type-14 pattern is azimuth-independent, so OFFAZIM does not change the
+    gain -- ``off_tx`` / ``off_rx`` are recorded for provenance.  Raises for
+    non-tabulated types.
     """
     cant = CantennaState()
     for iat, itr, path in ((1, 1, tx_path), (2, 2, rx_path)):
@@ -147,10 +207,7 @@ def cant_from_files(tx_path, rx_path, power_kw=1.0) -> CantennaState:
                 f"antenna file {path!r} is type {ant.jant}; only type 14 "
                 "(30 freq x 91 elevation) point-to-point tables are supported")
         cant.load_p2p(iat, ant, itr)
-    pkw = max(float(power_kw), 1e-6)
-    cant.pwrkw[1] = F32(power_kw)
-    cant.pwrdba[1] = F32(30.0 + 10.0 * np.log10(pkw))
-    return cant
+    return _finish_cant(cant, power_kw, tx_gos, rx_gos, off_tx, off_rx)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +223,45 @@ def _resolve_method(method):
     raise NotImplementedError(
         f"METHOD {method} is not supported; use 30 (smoothing), 20 (system "
         "performance) or 25 (all modes)")
+
+
+def _resolve_model(model, coeff, system):
+    """A Prop-SL ``model`` toggle -> (coeff, System).
+
+    From Prop-SL / PropServer ``voacapx.dat`` vs ``icepacx.dat``:
+
+    * ``"voacap"`` -> CCIR coefficients + FPROB ``(1, 1, 1, 0.0)`` -- exactly
+      the validated golden decks.  Supported.
+    * ``"icepac"`` -> URSI coefficients + FPROB ``(1, 1, 1, 0.70)``.
+
+    FPROB *is* consumed by the ported EF1VAR/ESIND/F2VAR chain (it is the PSC
+    critical-frequency multiplier), and PSC(4)=0.70 turns sporadic E ON, which
+    genuinely changes the answer.  Its leaves each carry a tier-B dump (CURMUF
+    has 85/145 cases with ESMUF>0; there is an ESMOD dump), BUT **no LUFFY
+    oracle deck combines URSI coefficients with PSC(4)=0.70** -- every captured
+    deck runs CCIR with PSC(4)=0 and ESMUF=0 -- so the composed ICEPAC /SON/
+    cannot be validated against voacapl here.  Rather than return numbers no
+    oracle backs, ``"icepac"`` refuses; a caller wanting URSI without the
+    unvalidated Es enable can pass ``coeff="URSI"`` explicitly.
+    """
+    if model is None:
+        return coeff, system
+    m = model.lower()
+    if m == "voacap":
+        s = replace(system, fprob=(1.0, 1.0, 1.0, 0.0)) if system else System()
+        return "CCIR", s
+    if m == "icepac":
+        raise NotImplementedError(
+            "model='icepac' requires URSI coefficients AND FPROB PSC(4)=0.70 "
+            "(sporadic-E enable).  FPROB is consumed by the ported "
+            "EF1VAR/ESIND/F2VAR chain and PSC(4)=0.70 changes the result, but "
+            "no LUFFY oracle deck combines URSI with PSC(4)>0 (every captured "
+            "deck is CCIR with ESMUF=0), so the composed ICEPAC output is "
+            "unvalidated.  Use model='voacap', or coeff='URSI' for the "
+            "validated URSI arm without the Es enable.")
+    raise NotImplementedError(
+        f"model={model!r}: only 'voacap' is supported ('icepac' refuses -- "
+        "see the message above)")
 
 
 def _ipflag(method, mspec, gcdkm):
@@ -239,13 +335,16 @@ def _setup_hour(circ, jt):
 
 def build_circuit(tx, rx, month, ssn, hour, freqs, *, method=30,
                   system=None, cant=None, coeff="CCIR", pole=POLE_DEFAULT,
-                  npsl=0, iono=None, circ=None):
+                  npsl=0, tx_bearing=None, rx_bearing=None, iono=None,
+                  circ=None):
     """One fully-built Stage-A ``Circuit`` for ``hour`` (1-based UTC).
 
     ``tx``/``rx`` are (lat_deg, lon_deg), south/west negative.  Returns
-    ``(circ, ipflag)``.  ``iono`` (a REDMAP ``IonoState``) and ``circ`` (a
-    Circuit to reuse for COMMON carry-over) may be supplied to avoid rebuilding
-    them across hours.
+    ``(circ, ipflag)``.  ``tx_bearing``/``rx_bearing`` (true azimuth, degrees,
+    of each antenna main beam) set OFFAZIM against GEOM's path bearing; ``None``
+    keeps the beam along the path (OFFAZIM 0).  ``iono`` (a REDMAP
+    ``IonoState``) and ``circ`` (a Circuit to reuse for COMMON carry-over) may
+    be supplied to avoid rebuilding them across hours.
     """
     system = system or System()
     psc, amind = system._psc()
@@ -257,10 +356,24 @@ def build_circuit(tx, rx, month, ssn, hour, freqs, *, method=30,
 
     st = iono if iono is not None else redmap(_COEFFS_DIR, coeff, int(month),
                                               F32(ssn))
-    if cant is None:
-        cant = isotropic_cant(system.power_kw)
 
     if circ is None:
+        # geometry is fixed for the path; build it once
+        tlatd, tlongd = tx
+        rlatd, rlongd = rx
+        wld = lambda a, b: noisy(st, 7, a, b)    # NOISY(7) land/sea map
+        g = geom(tlatd, tlongd, rlatd, rlongd, int(npsl), pole[0], pole[1],
+                 wld)
+        # OFFAZIM from the beam headings against the path bearing at each end
+        off_tx = offazim(g.btrd, tx_bearing) if tx_bearing is not None else 0.0
+        off_rx = offazim(g.brtd, rx_bearing) if rx_bearing is not None else 0.0
+        if cant is None:
+            cant = isotropic_cant(system.power_kw, system.tx_gos,
+                                  system.rx_gos, off_tx, off_rx)
+        else:
+            cant.offazim[1] = F32(off_tx)
+            cant.offazim[2] = F32(off_rx)
+
         circ = Circuit(iono=st)
         circ.cant = cant
         circ.muf.xluf[:] = F32(-1.0)           # SETOUT's preset
@@ -276,12 +389,6 @@ def build_circuit(tx, rx, month, ssn, hour, freqs, *, method=30,
         circ.pmp = F32(system.max_delay_ms)
         circ.want_service_prob = imeth in (20, 25, 30)
         circ.time.itim = 1                     # hours are UTC (GMT)
-        # geometry is fixed for the path; build it once
-        tlatd, tlongd = tx
-        rlatd, rlongd = rx
-        wld = lambda a, b: noisy(st, 7, a, b)    # NOISY(7) land/sea map
-        g = geom(tlatd, tlongd, rlatd, rlongd, int(npsl), pole[0], pole[1],
-                 wld)
         _install_geometry(circ, g, tlatd, tlongd, rlongd, amind)
         # user frequency list (FREL 1..nf), the DECRED flag, MUF column later
         for i, f in enumerate(freqs, start=1):
@@ -411,9 +518,9 @@ class Results:
 # ---------------------------------------------------------------------------
 
 def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
-            tx_antenna=None, rx_antenna=None, system=None, method=30,
-            coeff="CCIR", pole=POLE_DEFAULT, long_path=False,
-            fast_math=False) -> Results:
+            tx_antenna=None, rx_antenna=None, tx_bearing=None, rx_bearing=None,
+            system=None, method=30, model=None, coeff="CCIR", pole=POLE_DEFAULT,
+            long_path=False, fast_math=False) -> Results:
     """Predict an HF point-to-point circuit from raw inputs.
 
     Parameters
@@ -431,13 +538,30 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
     tx_antenna, rx_antenna : path or None
         A type-14 ``.VOA`` sample file, or None for a 0 dBi isotropic pattern.
         Both must be given together or both omitted.
+    tx_bearing, rx_bearing : float or None
+        Antenna main-beam true azimuth, degrees.  OFFAZIM is then the angle
+        between that beam and GEOM's path bearing at each end (ANTCALC's rule).
+        None (the default) points the beam along the path (OFFAZIM 0).
     system : System or None
-        SYSTEM/FPROB parameters; defaults to the golden decks' values.
+        The Prop-SL parameter surface (SYSTEM/FPROB + gain offsets); see
+        :class:`System`.  Defaults to the golden decks' values.
     method : int, default 30
         30 smoothing, 20 system performance, 25 all modes.
+    model : {'voacap', 'icepac', None}
+        Prop-SL model toggle.  ``'voacap'`` forces CCIR coefficients + FPROB
+        ``(1,1,1,0)`` (the validated configuration).  ``'icepac'`` (URSI +
+        FPROB ``(1,1,1,0.70)``) **raises** ``NotImplementedError``: FPROB is
+        consumed by the ported chain and PSC(4)=0.70 changes the answer, but no
+        oracle deck combines URSI with PSC(4)>0, so the result is unvalidated
+        (see :func:`_resolve_model`).  ``None`` uses ``coeff`` / ``system`` as
+        given.
     coeff : {'CCIR', 'URSI'}
+        Coefficient set when ``model`` is None.  'URSI' is the validated URSI
+        arm (leaf-level; no end-to-end LUFFY deck), without any Es enable.
     pole : (lat, lon)
         Geomagnetic north pole; see the module docstring.
+    long_path : bool
+        Take the long great-circle (through-antipode) geometry (NPSL=1).
     fast_math : bool
         Opt into the non-bit-exact native-f32 device libm.
 
@@ -446,6 +570,7 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
     Results
     """
     system = system or System()
+    coeff, system = _resolve_model(model, coeff, system)
     hours = [int(h) for h in hours]
     freqs_f = np.array([float(f) for f in freqs], dtype=np.float32)
     if not 1 <= len(freqs_f) <= 11:
@@ -456,9 +581,10 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
         raise NotImplementedError(
             "give both tx_antenna and rx_antenna, or neither (isotropic)")
     if tx_antenna is None:
-        cant = isotropic_cant(system.power_kw)
+        cant = isotropic_cant(system.power_kw, system.tx_gos, system.rx_gos)
     else:
-        cant = cant_from_files(tx_antenna, rx_antenna, system.power_kw)
+        cant = cant_from_files(tx_antenna, rx_antenna, system.power_kw,
+                               system.tx_gos, system.rx_gos)
 
     # One coefficient map for the whole request; one INDEPENDENT circuit per
     # hour (fresh /SON/), all sharing the iono and antenna tables.
@@ -470,7 +596,9 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
     for k, h in enumerate(hours):
         c, ip = build_circuit(tx, rx, month, ssn, h, freqs_f, method=method,
                               system=system, cant=cant, coeff=coeff,
-                              pole=pole, npsl=int(long_path), iono=st)
+                              pole=pole, npsl=int(long_path),
+                              tx_bearing=tx_bearing, rx_bearing=rx_bearing,
+                              iono=st)
         it = c.time.it
         muf[k] = c.muf.allmuf[it]
         fot[k] = c.muf.fot[it]

@@ -1,6 +1,6 @@
 """The public ``predict`` endpoint, validated against the LUFFY oracle decks.
 
-Three tests, three claims:
+The claims:
 
 * ``test_setup_chain_vs_oracle`` -- the setup chain (REDMAP -> GEOM -> SANG ->
   the per-hour GEOTIM/VIRTIM/TIMVAR/F2VAR/ESIND/IONSET/CURMUF chain), built
@@ -14,6 +14,17 @@ Three tests, three claims:
   is already validated bit-exact, any divergence here would be a setup-chain
   bug; there is none beyond the libm floor.
 
+* ``test_offazim_from_bearing`` / ``test_bearing_gain_path_vs_oracle`` -- the
+  antenna beam heading, against GEOM's path bearing, reproduces the captured
+  OFFAZIM, and the bearing -> OFFAZIM -> gain path reproduces the deck /SON/.
+
+* ``test_model_*`` -- the Prop-SL VOACAP/ICEPAC toggle: 'voacap' is the
+  validated configuration, 'icepac' honestly refuses (unvalidated FPROB 0.70).
+
+* ``test_gain_offset_*`` / ``test_advisory_*`` / ``test_propsl_*`` -- the
+  Prop-SL parameter surface (gain offsets consumed, bandwidth/modulation
+  advisory, RSN/LUFP threaded).
+
 * ``test_predict_smoke`` -- ``predict`` runs from pure Python inputs (no deck),
   returns a sane, correctly-shaped table with the expected monotonicities.
 
@@ -25,7 +36,8 @@ import numpy as np
 import pytest
 
 from voacap_gpu.engine import (POLE_DEFAULT, System, build_circuit,
-                               isotropic_cant, predict, predict_circuits)
+                               cant_from_files, isotropic_cant, offazim,
+                               predict, predict_circuits)
 from voacap_gpu.scalar.f32math import F32
 
 from tests.scalar.dumputil import ulp_diff_floored
@@ -229,3 +241,144 @@ def test_unsupported_raises():
     with pytest.raises(NotImplementedError):
         predict((0, 0), (10, 10), freqs=[10.0], month=6, ssn=100,
                 tx_antenna="x.voa", rx_antenna=None)
+
+
+# ---------------------------------------------------------------------------
+# OFFAZIM from antenna bearing
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not DUMPS.glob("*_in.csv"), reason="oracle dumps missing")
+def test_offazim_from_bearing():
+    """Beam heading + GEOM path bearing reproduce the captured OFFAZIM.
+
+    The lonpar deck's ANTENNA cards point the beams at 90 deg (TX) and 270 deg
+    (RX); ANTCALC recorded OFFAZIM 58.10 and 60.01 against the path.  Building
+    from those bearings must reproduce them.
+    """
+    deck = "lonpar_m01_s100_v30"
+    ants = _rows(DUMPS / f"{deck}_ant.csv")
+    cap = {(int(a["iant"])): (float(a["beammain"]), float(a["offazim"]))
+           for a in ants}
+    beam_tx, off_tx_cap = cap[1]
+    beam_rx, off_rx_cap = cap[2]
+    assert (beam_tx, beam_rx) == (90.0, 270.0)
+
+    c, _ip = build_circuit((51.50, -0.13), (48.85, 2.35), 1, 100, 1,
+                           [7.2, 14.1], tx_bearing=beam_tx, rx_bearing=beam_rx)
+    # OFFAZIM is an antenna azimuth; ANTCALC's path bearing and ours agree to
+    # the geom bearing floor (~0.01 deg), so a hundredth-degree bar is right.
+    assert abs(float(c.cant.offazim[1]) - off_tx_cap) < 0.02, (
+        f"OFFAZIM tx {float(c.cant.offazim[1])} vs captured {off_tx_cap}")
+    assert abs(float(c.cant.offazim[2]) - off_rx_cap) < 0.02, (
+        f"OFFAZIM rx {float(c.cant.offazim[2])} vs captured {off_rx_cap}")
+    # the direct formula, too
+    assert offazim(148.10538, 90.0) == pytest.approx(58.10538, abs=1e-3)
+    assert offazim(10.0, 350.0) == pytest.approx(20.0, abs=1e-4)   # wrap
+
+
+@pytest.mark.skipif(not DUMPS.glob("*_in.csv"), reason="oracle dumps missing")
+def test_bearing_gain_path_vs_oracle():
+    """The bearing -> OFFAZIM -> gain path, driven end-to-end on a real deck.
+
+    lonpar's sample.00 is a type-0 antenna: ANTCALC *synthesises* its gain
+    table by method-of-moments (10 dBi here), which is out of scope to rebuild
+    -- so this uses the captured /cantenna/ (the real gains) but installs
+    OFFAZIM from the antenna bearings through ``build_circuit``.  Running that
+    through the GPU kernel must still reproduce the deck /SON/: it confirms both
+    that our OFFAZIM matches ANTCALC's (to the bearing floor) and that the gain
+    LOOKUP consumes the captured table correctly.
+    """
+    pytest.importorskip("cupy")
+    deck = "lonpar_m01_s100_v30"
+    ins = _rows(DUMPS / f"{deck}_in.csv")
+    outs = _rows(DUMPS / f"{deck}_out.csv")
+    cant = _antennas(_rows(DUMPS / f"{deck}_ant.csv"))    # the REAL gains
+    v0 = ins[0]
+    system = _system_from_row(v0)
+    nf = sum(1 for i in range(1, 12) if v0[f"frel{i:02d}"] > 0)
+    freqs = [F32(v0[f"frel{i:02d}"]) for i in range(1, nf + 1)]
+
+    circ = None
+    total = exact = 0
+    for v, vout in zip(ins, outs):
+        circ, ip = build_circuit((51.50, -0.13), (48.85, 2.35), int(v["month"]),
+                                 F32(v["ssn"]), int(v["it"]), freqs,
+                                 method=_deck_method(v0), system=system,
+                                 cant=cant, tx_bearing=90.0, rx_bearing=270.0,
+                                 pole=POLE_DEFAULT, circ=circ)
+        # our OFFAZIM (from the bearing) lands on the captured value
+        assert abs(float(circ.cant.offazim[1]) - 58.1) < 0.02
+        predict_circuits([circ], [ip])
+        son = circ.son
+        for j in range(1, nf + 1):
+            for nm in _SON_NUM:
+                d = ulp_diff_floored(F32(getattr(son, nm)[j]),
+                                     F32(vout[f"{nm}{j:02d}"]))
+                total += 1
+                exact += d == 0.0
+                assert d <= ULP_BAR
+    frac = exact / total
+    print(f"\n{deck}: bearing+gain end-to-end {exact}/{total} "
+          f"bit-exact ({100 * frac:.2f}%)")
+    assert frac >= 0.95
+
+
+# ---------------------------------------------------------------------------
+# The VOACAP / ICEPAC model toggle
+# ---------------------------------------------------------------------------
+
+def test_model_voacap_matches_default():
+    """model='voacap' == CCIR + FPROB (1,1,1,0), i.e. the validated config."""
+    pytest.importorskip("cupy")
+    kw = dict(freqs=[7.0, 14.0, 21.0], month=6, ssn=120, hours=[6, 12, 18])
+    a = predict((40.0, -105.0), (48.85, 2.35), model="voacap", **kw)
+    b = predict((40.0, -105.0), (48.85, 2.35), coeff="CCIR",
+                system=System(fprob=(1.0, 1.0, 1.0, 0.0)), **kw)
+    assert np.array_equal(a.muf, b.muf)
+    assert np.allclose(a.dbw, b.dbw, equal_nan=True)
+    assert np.allclose(a.snr, b.snr, equal_nan=True)
+
+
+def test_model_icepac_refuses():
+    """model='icepac' refuses, and the message names FPROB / PSC(4)."""
+    with pytest.raises(NotImplementedError, match=r"FPROB|PSC\(4\)"):
+        predict((40.0, -105.0), (48.85, 2.35), freqs=[14.0], month=6, ssn=120,
+                hours=[12], model="icepac")
+    with pytest.raises(NotImplementedError, match="voacap"):
+        predict((40.0, -105.0), (48.85, 2.35), freqs=[14.0], month=6, ssn=120,
+                hours=[12], model="nonsense")
+
+
+# ---------------------------------------------------------------------------
+# The Prop-SL parameter surface
+# ---------------------------------------------------------------------------
+
+def test_gain_offset_shifts_signal():
+    """tx_gos + rx_gos add straight onto the received signal power, in dB."""
+    pytest.importorskip("cupy")
+    kw = dict(freqs=[14.0], month=6, ssn=120, hours=[12])
+    base = predict((40.0, -105.0), (48.85, 2.35), **kw)
+    off = predict((40.0, -105.0), (48.85, 2.35),
+                  system=System(tx_gos=8.0, rx_gos=4.0), **kw)
+    d = float(off.dbw[0, 0]) - float(base.dbw[0, 0])
+    assert d == pytest.approx(12.0, abs=1e-2), f"gain offset gave {d} dB"
+
+
+def test_advisory_params_do_not_change_results():
+    """bandwidth / modulation are advisory: carried, but inert to the answer."""
+    pytest.importorskip("cupy")
+    kw = dict(freqs=[7.0, 14.0], month=6, ssn=120, hours=[12])
+    a = predict((40.0, -105.0), (48.85, 2.35), **kw)
+    b = predict((40.0, -105.0), (48.85, 2.35),
+                system=System(bandwidth=3000.0, modulation="USB"), **kw)
+    assert np.allclose(a.dbw, b.dbw, equal_nan=True)
+    assert np.allclose(a.snr, b.snr, equal_nan=True)
+
+
+def test_propsl_snr_reliability_params():
+    """required_snr and required_reliability reach the circuit as RSN / LUFP."""
+    c, _ = build_circuit((40.0, -105.0), (48.85, 2.35), 6, 120, 12, [14.0],
+                         system=System(required_snr=50.0,
+                                       required_reliability=80))
+    assert float(c.rsn) == pytest.approx(50.0)
+    assert int(c.lufp) == 80
