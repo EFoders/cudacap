@@ -1,5 +1,5 @@
 // FDIST — find up to six modes (raysets) for the current hop distance.  The
-// CUDA C twin of stage_a/fdist.py (mirrors fdist.for).
+// CUDA C twin of scalar/fdist.py (mirrors fdist.for).
 //
 // For the hop distance DHOPKM = GHOP*RZ, FDIST walks the ReflxState ray
 // table looking for the low- and high-angle rays of each layer whose ground

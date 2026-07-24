@@ -1,5 +1,5 @@
 // RELBIL — reliability: pick the best mode, then combine all of them; the
-// CUDA C twin of stage_a/relbil.py.  Three separate things happen:
+// CUDA C twin of scalar/relbil.py.  Three separate things happen:
 //
 // 1. Per-mode reliability.  The required S/N is placed on a two-sided normal
 //    whose LOWER spread combines the noise UPPER decile with the signal LOWER

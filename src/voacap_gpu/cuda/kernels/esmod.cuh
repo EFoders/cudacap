@@ -1,5 +1,5 @@
 // ESMOD — sporadic-E modes, the /ZON/ slots REGMOD does not fill; the CUDA C
-// twin of stage_a/esmod.py.  REGMOD handles F- and E-layer modes and, where
+// twin of scalar/esmod.py.  REGMOD handles F- and E-layer modes and, where
 // sporadic E gets in the way of one, the obscuration loss.  ESMOD handles the
 // modes that reflect off the Es layer itself: a thin mirror at a fixed height
 // rather than a refraction through a profile, so there is no deviative loss

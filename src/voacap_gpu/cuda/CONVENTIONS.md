@@ -3,7 +3,7 @@
 Stage C compiles the Stage A control flow directly as CUDA C `__device__`
 functions, to be composed into one kernel where **one thread runs one whole
 LUFFY call** (one circuit-hour), state in registers/local memory. Stage A
-(`src/voacap_gpu/stage_a/`) is the authoritative source for every port: it is
+(`src/voacap_gpu/scalar/`) is the authoritative source for every port: it is
 line-faithful to the Fortran and validated bit-exact (or at the documented
 libm floor) against the oracle. **Port Stage A, not the Fortran** — Stage A
 has already resolved every Fortran-semantics question (NINT rounding, COMMON
@@ -63,10 +63,10 @@ printed, and asserted rare — never waved through with a tolerance.
 - One header per Stage A module: `cuda/<name>.cuh`, include-guarded
   `VOACAP_<NAME>_CUH`, including only `f32math.cuh`/`constants.cuh`/
   `state.cuh` and its declared dependencies.
-- Tests in `tests/stage_c/test_<name>.py`, following `test_xlin.py` /
+- Tests in `tests/cuda/test_<name>.py`, following `test_xlin.py` /
   `test_fnorml.py` as the pattern: a tiny `extern "C" __global__` wrapper
   kernel drives the device function once per thread; inputs come from the
-  routine's golden dump (`tests/stage_a/dumputil.load_dump`) when one
+  routine's golden dump (`tests/scalar/dumputil.load_dump`) when one
   exists, otherwise from the case generator its Stage A test uses; expected
   values are computed **by calling Stage A in-process** on the same cases;
   the assert is `bit-exact, all cases, all outputs`, plus the branch-coverage
@@ -74,9 +74,9 @@ printed, and asserted rare — never waved through with a tolerance.
 
 ## Process rules
 
-- Run tests with `uv run pytest tests/stage_c/test_<name>.py -x -q`
+- Run tests with `uv run pytest tests/cuda/test_<name>.py -x -q`
   (`uv run python`; there is no bare `python` on this machine).
 - Do not run any git command. Do not modify `reference/` (read-only vendored
-  Fortran), `stage_a/`, `stage_b/`, or another chunk's files.
+  Fortran), `scalar/`, `batched/`, or another chunk's files.
 - Report measured results honestly: numbers of cases, bit-exact fractions,
   any branch asserted unreachable.

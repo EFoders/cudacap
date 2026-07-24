@@ -1,6 +1,6 @@
 // SIGDIS — signal-distribution tables and the D-E absorption-loss parameters
 // for the path (SIGDIS_orig, the version.w32 'W'/'H' branch); the CUDA C twin
-// of stage_a/sigdis.py.
+// of scalar/sigdis.py.
 //
 // Part one loops over the KFX sample-area ionospheres, computing each area's
 // absorption index ABIY (with the Greg Hand / ICEPAC lower limit of 0.1 that

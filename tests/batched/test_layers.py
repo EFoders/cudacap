@@ -1,7 +1,7 @@
 """Stage B (PyTorch, batched) Module-2 layer chain vs. the oracle dump and
 vs. the Stage A chain, on CPU and CUDA.
 
-Same tier-B fixture as tests/stage_a/test_layers.py (golden/dumps/layers):
+Same tier-B fixture as tests/scalar/test_layers.py (golden/dumps/layers):
 the full TIMVAR->EF1VAR->F2VAR->ESIND->IONSET pipeline per grid point.
 Measured at generation: the batched chain reproduces the oracle to the same
 fidelity as the scalar port — the fs1/fs2/fs3/fi3 misses are the identical

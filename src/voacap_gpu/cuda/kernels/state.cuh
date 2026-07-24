@@ -1,7 +1,7 @@
 // Per-thread state structs — the CUDA C twins of the Stage A COMMON-block
 // dataclasses (allmodestate.py, frqstate.py, ... zonstate.py).
 //
-// ABI CONTRACT (load-bearing, see stage_c/state.py + tests/stage_c/
+// ABI CONTRACT (load-bearing, see cuda/state.py + tests/cuda/
 // test_state.py for the offset proof):
 //   * fields appear in EXACTLY the dataclass order, same lower-case names;
 //   * every member is 4 bytes (float or int) so the struct has no internal
@@ -18,7 +18,7 @@
 #ifndef VOACAP_STATE_CUH
 #define VOACAP_STATE_CUH
 
-// COMMON /allMODE/ — every mode found across the whole hop sweep (stage_a/
+// COMMON /allMODE/ — every mode found across the whole hop sweep (scalar/
 // allmodestate.py).  22 accumulator arrays, slot 1..20 used, 1-based.
 struct AllModeState {
     float abps[21];
@@ -49,7 +49,7 @@ struct AllModeState {
 };
 
 // COMMON /FRQ/ — the frequency complement and the frequency under test
-// (stage_a/frqstate.py).
+// (scalar/frqstate.py).
 struct FrqState {
     float frea[14];             // 1..11 freqs, 12 MUF, 13 LUF
     float frel[30];             // + slot 14 = DECRED's IFREQ flag
@@ -59,7 +59,7 @@ struct FrqState {
 };
 
 // /RON/, /ES/, /MFAC/, /GEOG/, /PSCA/ + SSN scalars — per-sample-area
-// ionospheric state (stage_a/layerstate.py).  1-based everywhere.
+// ionospheric state (scalar/layerstate.py).  1-based everywhere.
 struct LayerState {
     int km;
     int kfx;
@@ -98,7 +98,7 @@ struct LayerState {
     float psc[5];
 };
 
-// COMMON /LOSX/ — the long path's per-ray loss and gain table (stage_a/
+// COMMON /LOSX/ — the long path's per-ray loss and gain table (scalar/
 // losxstate.py).  ARFX and TLSKM are dead in the Fortran; carried for layout.
 struct LosxState {
     float andvx[46 * 4];        // (46, 4) row-major: andvx[ray * 4 + area]
@@ -111,7 +111,7 @@ struct LosxState {
     float efflp[46];            // indexed by ray alone
 };
 
-// COMMON /LPATH/ — the long-path branch's own working state (stage_a/
+// COMMON /LPATH/ — the long-path branch's own working state (scalar/
 // lpathstate.py).  The four scalars are blkdat DATA constants.
 struct LpathState {
     float gcdlng;               // DATA 10000.
@@ -122,7 +122,7 @@ struct LpathState {
     int ltxrgm[3];              // blkdat DATA LTXRGM/1,1/ in slots 1..2
 };
 
-// COMMON /MODES/ — the up-to-six propagation modes for one hop (stage_a/
+// COMMON /MODES/ — the up-to-six propagation modes for one hop (scalar/
 // modesstate.py).
 struct ModesState {
     float ghop;
@@ -134,7 +134,7 @@ struct ModesState {
     int itmod[7 * 4];           // (7, 4) row-major
 };
 
-// COMMON /MUFS/ — the circuit MUF/FOT outputs CURMUF writes (stage_a/
+// COMMON /MUFS/ — the circuit MUF/FOT outputs CURMUF writes (scalar/
 // mufstate.py).  Hour arrays 1-based (25,), layer arrays 1-based (5,).
 struct MufState {
     float emuf[25];
@@ -160,7 +160,7 @@ struct MufState {
     float ymuf[5];
 };
 
-// COMMON /ANOIS/ — the atmospheric-noise working set (stage_a/noisestate.py).
+// COMMON /ANOIS/ — the atmospheric-noise working set (scalar/noisestate.py).
 struct AnoisState {
     float atnu;
     float atny;
@@ -177,7 +177,7 @@ struct AnoisState {
 };
 
 // COMMON /c_noise/, /c_noises/, /c_method_used/ — GENOIS's breakdown
-// (stage_a/noisestate.py, NoiseDiagState).
+// (scalar/noisestate.py, NoiseDiagState).
 struct NoiseDiagState {
     int mode_n1;
     int mode_n2;
@@ -188,7 +188,7 @@ struct NoiseDiagState {
     int method_used;
 };
 
-// COMMON /RAYS/ — the ray-set / reflectrix table (stage_a/raysstate.py).
+// COMMON /RAYS/ — the ray-set / reflectrix table (scalar/raysstate.py).
 struct RaysState {
     int nang;
     float ang[41];
@@ -196,7 +196,7 @@ struct RaysState {
                                 // ifob[i * 31 * 6 + j * 6 + k]
 };
 
-// COMMON /REFLX/ — the per-control-area reflectrix table (stage_a/
+// COMMON /REFLX/ — the per-control-area reflectrix table (scalar/
 // reflxstate.py).  IAFTXR is nominally /LOSX/ but lives here in Stage A.
 struct ReflxState {
     float delfx[46 * 4];        // (46, 4) row-major: delfx[ray * 4 + area]
@@ -220,7 +220,7 @@ struct ReflxState {
 };
 
 // COMMON /SIGD/ — signal-distribution and D-E absorption-loss parameters
-// (stage_a/signalstate.py, SigdState).
+// (scalar/signalstate.py, SigdState).
 struct SigdState {
     float dsl;
     float asm_;                 // Stage A / Fortran name "asm"; renamed only
@@ -241,7 +241,7 @@ struct SigdState {
 };
 
 // COMMON /TON/ — path-average system loss + noise/reliability accumulators
-// (stage_a/signalstate.py, TonState).
+// (scalar/signalstate.py, TonState).
 struct TonState {
     float adj;
     float ads;
@@ -259,7 +259,7 @@ struct TonState {
 };
 
 // COMMON /SON/ + /DUDL_NOIS/ + /sncom/ + /cgains/ + /ALPHA/ + the /DON/
-// decile triples — the per-FREQUENCY results table (stage_a/sonstate.py).
+// decile triples — the per-FREQUENCY results table (scalar/sonstate.py).
 // mdl/mode/moder are Stage A lists of 2-char labels; here each slot is an
 // int index into LAYTYP (" E"=0, "F1"=1, "F2"=2, "ES"=3, " N"=4), or -1
 // for the empty label "".
@@ -300,7 +300,7 @@ struct SonState {
     float d90s;
 };
 
-// COMMON /TIME/ — the hour under test in every time base (stage_a/
+// COMMON /TIME/ — the hour under test in every time base (scalar/
 // timestate.py).
 struct TimeState {
     int it;
@@ -313,7 +313,7 @@ struct TimeState {
 };
 
 // COMMON /ZON/ — the per-mode results table for one frequency and hop
-// (stage_a/zonstate.py).  1-based (8,), slots 1..7 used.
+// (scalar/zonstate.py).  1-based (8,), slots 1..7 used.
 struct ZonState {
     float abps[8];
     float crel[8];

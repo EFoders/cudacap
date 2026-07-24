@@ -1,6 +1,6 @@
 """FDIST Stage C vs Stage A — up to six modes per hop, one thread per case.
 
-Cases come from the fdist golden dump exactly as tests/stage_a/test_fdist.py
+Cases come from the fdist golden dump exactly as tests/scalar/test_fdist.py
 builds them: the /REFLX/ ray table is injected verbatim from the dump (the
 same isolation Stage A uses to decouple FDIST from FOBBY/FINDF), GHOP is the
 oracle's, and expected values are Stage A run in-process.  The device gets

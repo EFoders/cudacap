@@ -1,8 +1,8 @@
 // CircuitState — one circuit-hour's worth of per-thread state, the CUDA C
-// twin of stage_a/circuit.py's `Circuit`.
+// twin of scalar/circuit.py's `Circuit`.
 //
 // ABI CONTRACT (same rules as state.cuh, proved by driver.py's CIRCUIT_DTYPE
-// and tests/stage_c/test_luffy_replay.py's sizeof kernel):
+// and tests/cuda/test_luffy_replay.py's sizeof kernel):
 //   * FIFTEEN of the sixteen per-thread state structs appear BY VALUE, in
 //     exactly the Stage A `Circuit` field order, with the same names.
 //     `rays` is the exception: COMMON /RAYS/ is 30,672 of the 55,652 bytes,

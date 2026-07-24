@@ -1,5 +1,5 @@
 // GMLOSS — "the gain minus loss function", and mostly a wrapper; the CUDA C
-// twin of stage_a/gmloss.py.  Sixty lines, of which the last twelve compute a
+// twin of scalar/gmloss.py.  Sixty lines, of which the last twelve compute a
 // quantity NOTHING EVER READS: TXRGML is assigned here and nowhere else in
 // voacapw, and no routine reads it.  So GMLOSS has exactly two surviving
 // effects — it presets all seven /ZON/ slots to the model's "no mode" markers

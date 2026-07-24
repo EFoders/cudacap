@@ -1,4 +1,4 @@
-// MPATH — multipath probability; the CUDA C twin of stage_a/mpath.py.
+// MPATH — multipath probability; the CUDA C twin of scalar/mpath.py.
 // Given the most reliable mode (NREL, chosen by RELBIL), find the highest
 // reliability among the OTHER modes that (a) exist (HP > 0), (b) arrive
 // MORE than DMP milliseconds away — the delay test reads backwards from the

@@ -1,6 +1,6 @@
 """FINDF Stage C vs Stage A — the frequency ray-table search, one thread/case.
 
-Cases come from the findf golden dump exactly as tests/stage_a/test_findf.py
+Cases come from the findf golden dump exactly as tests/scalar/test_findf.py
 builds them: ionogram via LECDEN+GENION plus the synthetic AFAC ramp, and the
 ORACLE'S own reflectrix (ifob.csv) + NANG injected rather than recomputed —
 the same isolation Stage A uses so FINDF's logic is tested independently of

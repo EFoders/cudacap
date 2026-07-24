@@ -1,5 +1,5 @@
 // PENANG — the penetration take-off angle DELPEN for each layer (E/F1/F2),
-// the CUDA C twin of stage_a/penang.py (mirrors penang.for).
+// the CUDA C twin of scalar/penang.py (mirrors penang.for).
 //
 // For the operating frequency FREQ, DELPEN(IL,K) is the take-off angle above
 // which the ray penetrates layer IL at control area K.  Each layer uses its

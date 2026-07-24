@@ -1,5 +1,5 @@
 // CONVH — the geometrical convergence factor for a long path; the CUDA C twin
-// of stage_a/convh.py.  Past a quarter turn a great-circle ray bundle stops
+// of scalar/convh.py.  Past a quarter turn a great-circle ray bundle stops
 // spreading and converges toward the antipode; CH is the decibel credit for
 // that focusing and PTOT the group path (two straight legs plus the reflection
 // arc).  Both are returned through out-pointers.

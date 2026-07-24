@@ -1,5 +1,5 @@
 // ALOSFV — the deviative-loss factor AFAC(30,5) for sample area K; the
-// CUDA C twin of stage_a/alosfv.py (alosfv.for).  Zero except for
+// CUDA C twin of scalar/alosfv.py (alosfv.for).  Zero except for
 // high-angle modes reflecting above the height of the MUF, where the loss
 // is the average collision frequency (an exponential CF in height) times
 // the group-minus-phase path excess (HPRIM - HTRUE - HM), normalised to the

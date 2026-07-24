@@ -1,5 +1,5 @@
 // FOBBY — the reflectrix table for sample area K.  The CUDA C twin of
-// stage_a/fobby.py (mirrors fobby.for).
+// scalar/fobby.py (mirrors fobby.for).
 //
 // For each restricted take-off angle ANG(1..NANG) and each of the 30
 // vertical-sounding frequencies, applies the secant law using the TRUE

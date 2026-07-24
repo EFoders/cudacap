@@ -1,5 +1,5 @@
 // FNORML — cumulative normal, AMS 55 26.2.17; CUDA C twin of
-// stage_a/fnorml.py.  Degree-4 polynomial raised to the fourth power,
+// scalar/fnorml.py.  Degree-4 polynomial raised to the fourth power,
 // argument folded to |x| and clamped at 5 sigma, result reflected back.
 // Callers that want the upper tail spell out ``1.0f - fnorml(z)`` — the two
 // float32 subtractions do NOT cancel and are part of the Fortran's answer.

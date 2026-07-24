@@ -1,5 +1,5 @@
 // FRQCOM — synthesise a frequency complement from 2 to 40 MHz; the CUDA C
-// twin of stage_a/frqcom.py.  Slot 12 always gets the circuit MUF; slot 13
+// twin of scalar/frqcom.py.  Slot 12 always gets the circuit MUF; slot 13
 // is zeroed ("no LUF yet") by every arm EXCEPT case 1, whose omission is
 // load-bearing and preserved.  Case 6 is dead (its guard is the constant
 // 36) exactly as in the Fortran, so case 5 is the final arm.

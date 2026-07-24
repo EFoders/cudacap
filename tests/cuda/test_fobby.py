@@ -1,6 +1,6 @@
 """FOBBY Stage C vs Stage A — the reflectrix build, one thread per case.
 
-Cases come from the fobby golden dump exactly as tests/stage_a/test_fobby.py
+Cases come from the fobby golden dump exactly as tests/scalar/test_fobby.py
 builds them (ionogram via LECDEN+GENION, NANG=1 with the dumped take-off
 angle); expected values are Stage A run in-process.  The device gets the
 packed LayerState/RaysState structs, one pair per thread, and the assert is

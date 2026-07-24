@@ -1,5 +1,5 @@
 // ESREG — would compute a mixed Es-F mode.  It does not.  It presets; the
-// CUDA C twin of stage_a/esreg.py.  The Fortran's 280 lines of mixed-mode
+// CUDA C twin of scalar/esreg.py.  The Fortran's 280 lines of mixed-mode
 // physics sit behind an unconditional RETURN ("ERRORS IN THE CODE BELOW"),
 // so the whole reachable behaviour is presetting /ZON/ slots 6 and 7 to the
 // no-mode markers.  Note CREL is +1000 here where ESMOD's Es slots get

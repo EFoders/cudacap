@@ -1,7 +1,7 @@
 """Stage B (PyTorch, batched) port of DAZEL.
 
 Element-wise identical to the Stage A transliteration
-(src/voacap_gpu/stage_a/dazel.py) up to libm rounding of float64
+(src/voacap_gpu/scalar/dazel.py) up to libm rounding of float64
 transcendentals, which the float32 interface narrowing absorbs — the same
 argument (and the same 1-ULP/98%-bit-exact test bar) used to validate
 Stage A against the gfortran oracle dump.

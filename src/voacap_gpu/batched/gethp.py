@@ -57,7 +57,7 @@ if NPL != 1:                    # pragma: no cover - guards a build-time change
 
 
 def _k(value, like):
-    """A constant as a float32 scalar tensor -- see stage_b/profile.py._k."""
+    """A constant as a float32 scalar tensor -- see batched/profile.py._k."""
     return torch.tensor(float(np.float32(value)), dtype=_F32,
                         device=like.device)
 

@@ -17,7 +17,7 @@ The transformation is:
 
 ``expand`` is a pure index read.  It performs NO ARITHMETIC, so the result is
 bit-identical to evaluating every lane -- not "within a ULP", identical -- and
-``tests/stage_b/test_dedupe.py`` asserts exactly that on real ANOIS1 oracle
+``tests/batched/test_dedupe.py`` asserts exactly that on real ANOIS1 oracle
 inputs with lanes duplicated on purpose.  That is the only property that makes
 this safe to drop into a chain whose whole value is bit-exactness.
 

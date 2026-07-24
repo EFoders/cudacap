@@ -43,7 +43,7 @@
 //      circuit-hours in one warp, sixteen lanes each, and every ballot, scan
 //      and syncwarp in this file is now group-local so that is exact -- it is
 //      proved bit-identical on all 504 replay circuit-hours by
-//      tests/stage_c/test_luffy_warp.py.  It is NOT the shipping default,
+//      tests/cuda/test_luffy_warp.py.  It is NOT the shipping default,
 //      because the launch has to change with it and the launch is not in this
 //      file; see "PACKING" below.
 //
@@ -82,9 +82,9 @@
 // ----------------------------------
 // Building this header with -DVC_WARP_GROUPS=2 makes every collective
 // group-local, but the LAUNCH still hands one circuit-hour to one warp.  The
-// change is entirely in `stage_c/driver.py` -- four lines in the kernel and
+// change is entirely in `cuda/driver.py` -- four lines in the kernel and
 // three in `stage_luffy` -- and is spelled out in full, and proved exact, in
-// tests/stage_c/test_luffy_warp.py's `_PACKED_SRC`:
+// tests/cuda/test_luffy_warp.py's `_PACKED_SRC`:
 //
 //     device, in luffy_batch_warp:
 //         int grp  = lane / VC_WARP_GLANES;          // NEW
@@ -197,7 +197,7 @@
 // identical to the one-circuit-hour-per-warp kernel.  Building with
 // -DVC_WARP_GROUPS=2 ALSO NEEDS THE LAUNCH TO CHANGE -- the circuit index,
 // the SmoothStore slice, the status write and the grid size all live in
-// stage_c/driver.py's kernel, which this header does not own.  See "PACKING"
+// cuda/driver.py's kernel, which this header does not own.  See "PACKING"
 // in the header comment for the exact change.
 // ---------------------------------------------------------------------------
 #ifndef VC_WARP_GROUPS

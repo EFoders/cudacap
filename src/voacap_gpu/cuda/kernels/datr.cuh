@@ -1,5 +1,5 @@
 // COMMON /DATR/ — the Gaussian-integration setup GETHP uses; the CUDA C twin
-// of stage_a/datr.py.
+// of scalar/datr.py.
 //
 // XT/WT are the 20-point half Gauss-Legendre abscissae/weights from
 // blkdat.for (GETHP evaluates the folded 40-point rule via the 1-XT / 1+XT

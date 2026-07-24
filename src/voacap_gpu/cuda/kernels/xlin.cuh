@@ -1,5 +1,5 @@
 // XLIN — general piecewise-linear table interpolation, the CUDA C twin of
-// stage_a/xlin.py (itself a branch-for-branch transliteration of xlin.for's
+// scalar/xlin.py (itself a branch-for-branch transliteration of xlin.for's
 // arithmetic-IF web).  Tolerant of non-monotonic tables: first bracketing
 // segment wins, with increasing / flat / decreasing runs handled separately
 // and endpoint clamping outside the table.  REAL*4, no transcendentals.

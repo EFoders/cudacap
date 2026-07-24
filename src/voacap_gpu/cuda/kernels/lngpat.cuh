@@ -1,5 +1,5 @@
 // LNGPAT — assemble the long path's single mode; the CUDA C twin of
-// stage_a/lngpat.py.  SELTXR has already chosen one ray at each end,
+// scalar/lngpat.py.  SELTXR has already chosen one ray at each end,
 // LTXRGM(1) at control area 1 and LTXRGM(2) at area ITXRCP(2); LNGPAT averages
 // the two into a single geometry — mean take-off angle, mean virtual height —
 // and prices it with CONVH (convergence credit and group path), GETTOP (how

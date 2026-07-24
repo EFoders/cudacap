@@ -8,7 +8,7 @@ ratio TIMVAR wants (KJ=8).  Only the series LIMITS depend on KJ -- 15x10 for
 KJ=8, 29x15 for everything else -- so the batched entry point takes the
 coefficient slice, the two normalising constants and the limits as ARGUMENTS
 rather than reaching into an IonoState.  Callers with a different overlay
-(the Fortran aliases COMMON /TWO/ two ways; see stage_a/noisy.py) hand in
+(the Fortran aliases COMMON /TWO/ two ways; see scalar/noisy.py) hand in
 whatever slice they mean.
 
 THE LOOP BOUNDS ARE TABLE CONSTANTS, NOT DATA.  LM and LN come from a two-way
@@ -37,7 +37,7 @@ float32.  SIN and COS are the only libm calls, and they enter once each per
 axis -- but the recurrence then multiplies their error through 29 harmonics
 and the series sums 435 terms of it, so this carries the
 [[f32-libm-noise]] floor with real amplification.  Measured against the
-oracle through ANOIS1: see tests/stage_b/test_anois1.py.
+oracle through ANOIS1: see tests/batched/test_anois1.py.
 """
 
 import torch
@@ -48,9 +48,9 @@ _F32 = torch.float32
 
 # Bound once at module level so a test can substitute Stage A's gfortran-
 # matched SIN/COS and check what is left.  Nothing is: with sin32/cos32 in
-# place of torch's, this reproduces stage_a/noisy.py BIT FOR BIT on both
+# place of torch's, this reproduces scalar/noisy.py BIT FOR BIT on both
 # devices, which is what says the 435-term accumulation order is faithful and
-# the whole residual is the libm pair.  See tests/stage_b/test_anois1.py.
+# the whole residual is the libm pair.  See tests/batched/test_anois1.py.
 _sin = torch.sin
 _cos = torch.cos
 

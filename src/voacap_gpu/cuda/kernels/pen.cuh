@@ -1,5 +1,5 @@
 // PEN — retardation (penetration) term for a parabolic layer I at sample
-// area K, evaluated at frequency F; the CUDA C twin of stage_a/pen.py
+// area K, evaluated at frequency F; the CUDA C twin of scalar/pen.py
 // (pen.for).  REAL*4; ALOG via log32.
 //
 // FI/YI are the (4, 6) row-major 1-based arrays inside LayerState:

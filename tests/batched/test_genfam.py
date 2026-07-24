@@ -2,7 +2,7 @@
 
 The whole dump is one batch.  It spans all twelve months, so the FAM/DUD
 tables are fed in their per-lane form -- see the module docstring in
-``stage_b/genfam.py`` for why that form exists; ``test_shared_tables_agree``
+``batched/genfam.py`` for why that form exists; ``test_shared_tables_agree``
 is what says the shared form production actually uses computes the same
 thing, so the extra path is not an untested second implementation.
 

@@ -1,5 +1,5 @@
 // SETLNG — replicate the computed sample area across the array slots; the
-// CUDA C twin of stage_a/setlng.py.  Pure array replication, no arithmetic:
+// CUDA C twin of scalar/setlng.py.  Pure array replication, no arithmetic:
 //
 //   KFX >= 3   all slots already populated; do nothing
 //   KFX <= 1   copy area 1's per-area scalars + FS/FI/YI/HI into areas 2..5,

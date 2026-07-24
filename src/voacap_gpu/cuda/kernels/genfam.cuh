@@ -1,5 +1,5 @@
 // GENFAM — frequency dependence of atmospheric noise, plus its decile
-// tables; the CUDA C twin of stage_a/genfam.py.
+// tables; the CUDA C twin of scalar/genfam.py.
 //
 //   * FA        — Fam at FREQ from the FAM(14,12) coefficients: two nested
 //                 degree-6 Horner evaluations (PZ from FAM 1..7, PX from

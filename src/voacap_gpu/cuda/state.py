@@ -4,7 +4,7 @@ For every Stage A state dataclass there is a numpy structured dtype whose
 byte layout is IDENTICAL to the corresponding C struct in ``state.cuh``:
 every member is 4 bytes (float32/int32) so neither side has padding, fields
 are declared in the same order, and multi-dimensional numpy subarrays are
-stored row-major exactly as the flattened C arrays.  ``tests/stage_c/
+stored row-major exactly as the flattened C arrays.  ``tests/cuda/
 test_state.py`` proves the correspondence field-for-field on the device.
 
 ``pack_<name>(obj)`` serialises a Stage A instance into a shape-() array of

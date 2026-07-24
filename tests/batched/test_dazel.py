@@ -1,6 +1,6 @@
 """Stage B (PyTorch) DAZEL vs. the tier-B oracle dump and vs. Stage A.
 
-Same pass bar as Stage A (see tests/stage_a/test_dazel.py): every field
+Same pass bar as Stage A (see tests/scalar/test_dazel.py): every field
 within 1 float32 ULP of the gfortran oracle, and ≥98% bit-exact.  Runs on
 CPU always and on CUDA when available (the Stage B production target).
 """

@@ -1,5 +1,5 @@
 // GETTOP — how much of a long path the ray flies OVER the E layer; the CUDA C
-// twin of stage_a/gettop.py.  A daylit middle can reflect a frequency the dark
+// twin of scalar/gettop.py.  A daylit middle can reflect a frequency the dark
 // ends let straight through; that stretch never sees the D-region absorption
 // underneath.  The three sample areas are read at the E layer only (HI(1,*)
 // and FI(1,*)); each vertical E critical is projected to the oblique

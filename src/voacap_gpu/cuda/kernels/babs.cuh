@@ -1,5 +1,5 @@
 // BABS — absorption loss per kilometre for the long path's absorbing leg;
-// the CUDA C twin of stage_a/babs.py.  The non-deviative term
+// the CUDA C twin of scalar/babs.py.  The non-deviative term
 // 677.2*ACAV/((f+fH)**1.98 + 10.2) turned into a per-kilometre figure by
 // PORT (hops per leg length, referred to 100 km).  1000 dB/km is the "no
 // absorption computed" marker.

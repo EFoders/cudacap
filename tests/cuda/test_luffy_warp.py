@@ -56,7 +56,7 @@ pytestmark = requires_cuda
 # its own circuit-hour on its own twelve frequencies, and every ballot, scan,
 # shuffle and syncwarp in the file becomes group-local.  The LAUNCH has to
 # change with it -- the circuit index, the SmoothStore slice, the status write
-# and the grid all move -- and that lives in ``stage_c/driver.py``, so the
+# and the grid all move -- and that lives in ``cuda/driver.py``, so the
 # packed kernel is spelled out HERE rather than shipped: this test is what
 # proves the group-local machinery exact, and the driver change is a
 # four-line diff against ``luffy_batch_warp`` (see the header of

@@ -1,5 +1,5 @@
 // ANOIS1 — the 1 MHz atmospheric noise at the receiver site; the CUDA C twin
-// of stage_a/anois1.py.
+// of scalar/anois1.py.
 //
 // Picks the two local-time noise blocks nearest the receiver mean time GMTR —
 // KJ (the block CC falls in) and JK (the adjacent block toward CC, wrapped

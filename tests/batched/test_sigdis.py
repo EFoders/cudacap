@@ -52,7 +52,7 @@ WHAT THIS BATCH DOES NOT REACH, stated rather than glossed:
     checks that arm against **Stage A** on a doctored input.  That is the
     weaker claim -- two ports agreeing, not a port agreeing with the Fortran.
   * **SYSSY's no-data (ITSA-1) fallback.**  REDMAP always succeeds here, so
-    F2D(1,1,1) > 0 on every lane.  ``tests/stage_b/test_syssy.py`` covers
+    F2D(1,1,1) > 0 on every lane.  ``tests/batched/test_syssy.py`` covers
     that arm against the oracle directly, on 21 lanes.
   * SIGDIS_alex (the 1/3/5 area stride) and the 'I'/'a' variants without the
     0.1 absorption floor are not ported at all -- the oracle's version string

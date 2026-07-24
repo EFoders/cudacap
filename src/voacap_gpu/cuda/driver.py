@@ -10,7 +10,7 @@ and reads the mutated states back into Stage A objects.
 THE ABI, and how it is proved
 -----------------------------
 ``CIRCUIT_DTYPE`` is a numpy structured dtype built from the per-struct
-dtypes in ``stage_c/state.py`` — the same ones ``tests/stage_c/test_state.py``
+dtypes in ``cuda/state.py`` — the same ones ``tests/cuda/test_state.py``
 already pins field-for-field against ``state.cuh`` — followed by the loose
 scalars in Stage A ``Circuit`` order.  Every member is 4 bytes, so numpy's
 unaligned packing equals the C layout.  ``circuit_state_sizeof()`` compiles a
@@ -56,7 +56,7 @@ and 1.8 GB coming back.  Almost none of it is INPUT.  ``UPLOAD_FIELDS`` below
 is the set that is, established by experiment rather than by reading the
 source: zero one field in all 504 replay circuit-hours, launch, and diff the
 WHOLE output against the clean run.  A field whose zeroing changes nothing
-else is not read.  ``tests/stage_c/test_input_set.py`` pins the result, and
+else is not read.  ``tests/cuda/test_input_set.py`` pins the result, and
 ``tools/bench_stage_c.py --trip`` measures what it buys.
 
 The three buckets that came out of that sweep, for the whole CircuitState and
@@ -328,7 +328,7 @@ def _columns(runs, dtype, paths):
 
 _CIRC_WORDS = CIRCUIT_DTYPE.itemsize // 4
 # The leaf-level expansion of the two declarations, for callers that need to
-# ask "is THIS field sent?" (tests/stage_c/test_input_set.py does).
+# ask "is THIS field sent?" (tests/cuda/test_input_set.py does).
 UPLOAD_LEAVES = expand_fields(CIRCUIT_DTYPE, UPLOAD_FIELDS)
 RAYS_UPLOAD_LEAVES = expand_fields(RAYS_DTYPE, RAYS_UPLOAD_FIELDS)
 _UPLOAD_RUNS = _merge(_span(CIRCUIT_DTYPE, p) for p in UPLOAD_FIELDS)
@@ -559,7 +559,7 @@ def load_kernel(groups: int = 1, fast_math: bool = False):
     cuda/luffy_warp.cuh.  It changes nothing about the thread kernel.
 
     ``fast_math`` selects the opt-in native-f32 libm (see cuda/f32math.cuh).
-    It is NOT bit-exact against Stage A -- tests/stage_c/test_fastmath.py is
+    It is NOT bit-exact against Stage A -- tests/cuda/test_fastmath.py is
     what pins what it costs -- so it is off unless asked for.
     """
     if groups not in (1, 2):
@@ -776,13 +776,13 @@ def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     * ``"inputs"`` sends only ``UPLOAD_FIELDS`` + ``RAYS_UPLOAD_FIELDS`` --
       3,228 bytes per thread -- and zeroes the rest on the device.  The
       kernel computes the same answer; see the module docstring and
-      ``tests/stage_c/test_input_set.py``.  Fetch it with ``fetch_results``:
+      ``tests/cuda/test_input_set.py``.  Fetch it with ``fetch_results``:
       ``fetch_luffy`` would return zeros for the scratch the host never sent.
 
     ``warp`` selects ``luffy_batch_warp`` (cuda/luffy_warp.cuh) — one WARP per
     circuit-hour, lane L on frequency L+1 — instead of the one-thread-per-
     circuit-hour ``luffy_batch``.  The two are bit-identical; see
-    ``tests/stage_c/test_luffy_warp.py``.
+    ``tests/cuda/test_luffy_warp.py``.
 
     Returns ``(run, state)`` — call ``run()`` to launch (as many times as you
     like; the kernel mutates the staged state in place), and pass ``state`` to
@@ -977,7 +977,7 @@ class LuffyArena:
     outside ``UPLOAD_FIELDS`` is read before it is written -- and it is
     *safer* than uninitialised memory would be, because every leftover word
     is a value this kernel itself produced, so no integer is out of its own
-    range.  ``tests/stage_c/test_input_set.py`` runs the same batch through an
+    range.  ``tests/cuda/test_input_set.py`` runs the same batch through an
     arena twice and requires the second answer to equal the first.
 
     Usage::
@@ -1092,7 +1092,7 @@ class PipelinedLuffy:
     Bit-identity: each stream's device buffers are zeroed ONCE at construction
     and never re-zeroed, the same reuse ``LuffyArena`` relies on and the same
     input-set guarantee makes safe.  The pipelined result is bit-identical to
-    the serial arena on every field; ``tests/stage_c/test_pipeline.py`` pins
+    the serial arena on every field; ``tests/cuda/test_pipeline.py`` pins
     it across several chunk sizes, stream counts and a ragged tail.
 
     Usage::
@@ -1118,7 +1118,7 @@ class PipelinedLuffy:
         self._m = len(_UPLOAD_IDX)
         # fast_math is the opt-in native-f32 libm (cuda/f32math.cuh); it is NOT
         # bit-exact against Stage A, so a pipelined run inherits exactly the
-        # deviation tests/stage_c/test_fastmath.py pins and nothing more.
+        # deviation tests/cuda/test_fastmath.py pins and nothing more.
         self._fn = load_kernel(fast_math=fast_math).get_function("luffy_batch")
         self._grid = ((self.chunk + block - 1) // block,)
         self._scatter = _xfer("scatter_words")

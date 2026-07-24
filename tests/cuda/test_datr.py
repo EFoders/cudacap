@@ -3,7 +3,7 @@
 datr.cuh is pure data (the folded 20-point Gauss-Legendre rule GETHP sums
 over, plus the NT/NPL/XNPL/TWDIV startup scalars).  The kernel reads every
 slot back through the device tables and the test asserts bit-identity with
-stage_a/datr.py — a wrong or mistyped literal anywhere in the tables fails
+scalar/datr.py — a wrong or mistyped literal anywhere in the tables fails
 loudly here rather than as a diffuse GETHP mismatch.
 """
 

@@ -1,5 +1,5 @@
 // INMUF — insert over-the-MUF and zero-distance modes, then run REGMOD; the
-// CUDA C twin of stage_a/inmuf.py.  FDIST only finds modes that appear in the
+// CUDA C twin of scalar/inmuf.py.  FDIST only finds modes that appear in the
 // reflectrix.  Above the MUF there are none, and at very short distances the
 // ray table does not reach, yet the prediction still needs a mode to attach a
 // loss to.  INMUF supplies them so the frequency sweep degrades through the

@@ -1,5 +1,5 @@
 // SETTXR — price every ray at the transmitter and receiver ends; the CUDA C
-// twin of stage_a/settxr.py (SETTXR_ORIG, which is what the vendored
+// twin of scalar/settxr.py (SETTXR_ORIG, which is what the vendored
 // "Version 16.1207W" string dispatches to).  For each of the two control areas
 // ITXRCP holds, SETTXR walks all 45 rays FINDF laid down and fills /LOSX/:
 // absorption, deviative loss, sporadic-E obscuration, ground loss and antenna

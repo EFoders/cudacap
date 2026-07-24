@@ -1,5 +1,5 @@
 // SERPRB — service probability: reliability with the prediction error folded
-// in; the CUDA C twin of stage_a/serprb.py.  Rebuilds RELBIL's normal test
+// in; the CUDA C twin of scalar/serprb.py.  Rebuilds RELBIL's normal test
 // per mode off /allMODE/ but widens the spread by everything uncertain about
 // the PREDICTION (system-loss error ADS/SUS/SLS, noise error SIGM/SYGU/SYGL,
 // and a flat 2 dB for the required S/N), then takes the maximum over modes.

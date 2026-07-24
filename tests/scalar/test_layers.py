@@ -13,7 +13,7 @@ that are direct functions of GAMMA:
   fi3 = (GAMMA(4)+0.5*GYZ)*PSC(3)      (foF2 term)
   f2m3 = GAMMA(5); hpf2 = 1490/GAMMA(5)-176
 
-so their bars mirror tests/stage_a/test_versy.py's GAMMA bars.  Worst
+so their bars mirror tests/scalar/test_versy.py's GAMMA bars.  Worst
 observed: fs2 252 floored ULP (~3e-5 absolute, in the Es 5e-5 band).  The
 branch-driven E/F1 slots (fi2/hi2/yi2) and KFX are exact — no case sits on
 a zenith branch boundary where a 1-ULP wobble would flip F1 present/absent.

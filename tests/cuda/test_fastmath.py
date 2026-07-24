@@ -73,7 +73,7 @@ as the DOMINANT residual against the real Fortran.  Counted here over the
     fast-math build vs Stage A   96 flips (0.0116%), every one exactly 1 kHz,
                                  touching 61 of 504 circuit-hours
 
-For scale, ``tests/stage_a/test_luffy_replay.py`` measured Stage A's OWN IFOB
+For scale, ``tests/scalar/test_luffy_replay.py`` measured Stage A's OWN IFOB
 against the Fortran's at 139 flips in 55,440 entries -- **0.251%**.  So fast
 math adds a kHz-flip rate roughly TWENTY TIMES SMALLER than the one the port
 already carries against the oracle, and none of the 96 propagated into a
@@ -387,7 +387,7 @@ def test_fastmath_fobby_khz_flip_rate():
           f"fast {nf} ({100.0 * frac:.4f}%), max {int(d.max())} kHz, "
           f"{hours}/{n} circuit-hours touched")
     print("  Stage A's own IFOB vs the Fortran's: 139/55,440 = 0.2507% "
-          "(tests/stage_a/test_luffy_replay.py)")
+          "(tests/scalar/test_luffy_replay.py)")
 
     assert frac <= MAX_IFOB_FLIP_FRAC, (
         f"FOBBY kHz flip rate {100 * frac:.4f}% exceeds the "

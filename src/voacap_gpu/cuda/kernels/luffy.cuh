@@ -1,5 +1,5 @@
 // LUFFY — one hour of system performance over the whole frequency list; the
-// CUDA C twin of stage_a/luffy.py.  ONE THREAD RUNS ONE WHOLE CIRCUIT-HOUR.
+// CUDA C twin of scalar/luffy.py.  ONE THREAD RUNS ONE WHOLE CIRCUIT-HOUR.
 //
 // This is the driver every Stage C leaf hangs off.  It runs once per hour and
 // does three things in order: pick the controlling sample area and build its

@@ -1,4 +1,4 @@
-// REAL*4 arithmetic helpers — the CUDA C twin of stage_a/f32math.py.
+// REAL*4 arithmetic helpers — the CUDA C twin of scalar/f32math.py.
 //
 // Evaluate in binary64, round ONCE to binary32.  This is the convention the
 // whole project standardised on: it matches Stage A bit-for-bit (verified on
@@ -12,7 +12,7 @@
 // There is ONE opt-in escape hatch, -DVOACAP_FAST_MATH, documented at length
 // below.  It is off unless a caller passes it through
 // ``stage_c.compile.load(..., extra_opts=("-DVOACAP_FAST_MATH",))``, and
-// ``tests/stage_c/test_fastmath.py`` is what pins what it costs.
+// ``tests/cuda/test_fastmath.py`` is what pins what it costs.
 
 // ---------------------------------------------------------------------------
 // OPT-IN FAST MATH — -DVOACAP_FAST_MATH.  OFF BY DEFAULT; the default is and
@@ -29,7 +29,7 @@
 //
 // * The nine TRANSCENDENTALS switch to the native f32 routines, which are
 //   0.5 ulp no longer.  MEASURED on this toolchain over 400k arguments
-//   (tests/stage_c/test_fastmath.py): 2 ulp worst for expf and log10f, 1 ulp
+//   (tests/cuda/test_fastmath.py): 2 ulp worst for expf and log10f, 1 ulp
 //   for sinf/cosf/asinf/acosf/atanf/logf/powf, 66-97% of results still
 //   bit-identical.  That is the entire accuracy cost, and it is NOT uniform
 //   across the program: FOBBY truncates ``1000.*FREQ`` to integer kHz, so a

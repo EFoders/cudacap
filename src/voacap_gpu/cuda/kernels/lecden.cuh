@@ -1,6 +1,6 @@
 // LECDEN — builds the electron-density profile HTR(50,1)/FNSQ(50,1) (true
 // height km, plasma frequency squared MHz^2) from the E/F1/F2 layer
-// parameters for sample area K; the CUDA C twin of stage_a/lecden.py
+// parameters for sample area K; the CUDA C twin of scalar/lecden.py
 // (lecden.for).  Takes the pointwise maximum of the D-region exponential
 // tail, the parabolic E, a linear valley, the parabolic-or-linear F1, and
 // the parabolic F2.
@@ -12,7 +12,7 @@
 //
 // The one arithmetic note: Stage A writes ``(fi[1,k]/fi[2,k]) ** 2`` (numpy
 // scalar power).  gfortran emits a multiply for an INTEGER exponent and so
-// does every other port in this project (see stage_b/profile.py); numpy's
+// does every other port in this project (see batched/profile.py); numpy's
 // f32 powf deviates from the correctly rounded square by 1 ULP on ~0.03% of
 // arguments.  Here it is the multiply t*t; the Stage C test counts any
 // resulting divergence and asserts it rare.

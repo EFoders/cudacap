@@ -1,5 +1,5 @@
 // PWRDB — transmitter power in dBW at a frequency; the CUDA C twin of
-// stage_a/pwrdb.py.  The same DO-50 scan GAIN uses, over /cantenna/
+// scalar/pwrdb.py.  The same DO-50 scan GAIN uses, over /cantenna/
 // transmitter entries covering the frequency, but returning /pantenna/
 // PWRDBA instead of a gain.  The frequency is clamped to 2-30 MHz *for the
 // range test only* — never applied to the returned power.

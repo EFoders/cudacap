@@ -1,5 +1,5 @@
 // ALLMODES — accumulate /ZON/ modes into /allMODE/ across the hop sweep;
-// the CUDA C twin of stage_a/allmodes.py.  Pure bookkeeping: no arithmetic
+// the CUDA C twin of scalar/allmodes.py.  Pure bookkeeping: no arithmetic
 // at all, only assignment and IFLG-driven index selection.
 //
 //   IFLG 0      reset: clear the 20 slots to the no-mode markers, FREQ = FVAL

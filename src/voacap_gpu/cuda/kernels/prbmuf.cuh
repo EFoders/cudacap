@@ -1,5 +1,5 @@
 // PRBMUF — probability the operating frequency exceeds a layer's MUF/FOT/HPF;
-// the CUDA C twin of stage_a/prbmuf.py.  PRBMUF = 1 - FNORML(Z) with the
+// the CUDA C twin of scalar/prbmuf.py.  PRBMUF = 1 - FNORML(Z) with the
 // normal tail from the quartic Hastings rational approximation, Z the
 // operating frequency's departure from FGO scaled by the layer's decile
 // spread (/MUFS/ SIGL below the median, SIGU above, both relative to FSET).

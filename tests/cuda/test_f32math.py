@@ -2,7 +2,7 @@
 
 Two separate claims, and the second is the one that guards everybody else:
 
-1. Every f32math.cuh helper is bit-identical to stage_a/f32math.py — the
+1. Every f32math.cuh helper is bit-identical to scalar/f32math.py — the
    f64-evaluate-round-once convention transfers to CUDA's binary64 libm.
 2. ``a*b + c`` compiled through compile.load() is NOT contracted to an FMA.
    NVRTC contracts by default; --fmad=false is what turns it off, and this

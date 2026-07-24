@@ -1,5 +1,5 @@
 // COMMON /CON/ constants, verbatim from blkdat.for:129-131 (REAL*4) — the
-// CUDA C twin of stage_a/constants.py.  A C float literal rounds its decimal
+// CUDA C twin of scalar/constants.py.  A C float literal rounds its decimal
 // to nearest-even binary32 exactly as np.float32 does, so these are the same
 // bit patterns.  Deliberately NOT high-precision: PI is 3.1415926, D2R/R2D
 // are truncated, faithful to the Fortran.

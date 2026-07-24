@@ -1,6 +1,6 @@
 // GETHP — virtual and true reflection heights for vertical frequency FXX,
 // by NT-point Gaussian integration of 1/mu over the LECDEN profile; the
-// CUDA C twin of stage_a/gethp.py (gethp.for).  REAL*4; only SQRT
+// CUDA C twin of scalar/gethp.py (gethp.for).  REAL*4; only SQRT
 // (correctly rounded) appears, so GETHP is bit-clean.
 //
 // The two monotonicity-aware table searches (the true-height crossing of FR

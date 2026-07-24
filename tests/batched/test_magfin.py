@@ -1,7 +1,7 @@
 """Stage B (PyTorch, batched) MAGVAR/MAGFIN vs. the tier-B oracle dump, on
 CPU and CUDA.
 
-Same fixture as tests/stage_a/test_magvar.py.  gyz and clg (clg is a pure
+Same fixture as tests/scalar/test_magvar.py.  gyz and clg (clg is a pure
 float32 add) stay bit-exact/1-ULP; gmdip is a dip angle that can pass
 through zero, so it uses the scale-floored metric — the raw ULP explodes
 there while the absolute error stays ~1e-8 rad (the atan-chain libm floor,

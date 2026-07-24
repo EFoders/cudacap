@@ -1,7 +1,7 @@
 """Stage B (PyTorch, batched) Module-2 layer chain: the coefficient maps
 turned into E/F1/F2/Es parameters at every grid point.
 
-Composes the batched VERSY (stage_b/versy.py) with batched ports of
+Composes the batched VERSY (batched/versy.py) with batched ports of
 NOISY(8), TIMVAR, EF1VAR, F2VAR, ESIND and IONSET (KM=1 per grid point).
 The scalar chain's data-dependent branches — EF1VAR's F1 present/absent
 (Z<=ZMAX), F2VAR's twilight / F1->F2 merge, IONSET's consistency zeroing —

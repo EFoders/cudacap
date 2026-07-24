@@ -1,5 +1,5 @@
 // REGMOD — per-mode loss budget for one frequency and hop distance; the CUDA C
-// twin of stage_a/regmod.py.  Takes the up-to-six regular modes FDIST left in
+// twin of scalar/regmod.py.  Takes the up-to-six regular modes FDIST left in
 // /MODES/ and turns each into a full link budget in /ZON/: free-space loss,
 // non-deviative absorption, deviative loss, ground-reflection loss, sporadic-E
 // obscuration, antenna gains, the over-the-MUF loss and its deciles, and from

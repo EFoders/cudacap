@@ -1,5 +1,5 @@
 // BENDY — bending correction for a parabolic layer I at sample area K,
-// evaluated at frequency F; the CUDA C twin of stage_a/bendy.py (bendy.for).
+// evaluated at frequency F; the CUDA C twin of scalar/bendy.py (bendy.for).
 // REAL*4; ALOG via log32.
 //
 // FI/YI are the (4, 6) row-major 1-based arrays inside LayerState:

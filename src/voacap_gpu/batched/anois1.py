@@ -68,7 +68,7 @@ each.  The honest key is (grid point, hour), so::
     out = expand(compact, inv)                   # back to N lanes, exactly
 
 ``expand`` is an index read, so ``out`` is bit-identical to calling
-``anois1_batch`` on all N lanes -- see ``tests/stage_b/test_dedupe.py``, which
+``anois1_batch`` on all N lanes -- see ``tests/batched/test_dedupe.py``, which
 asserts that on this routine's own oracle inputs.  FAKP/FAKABP go through
 unchanged in the shared (29,16,6) form; in the per-lane (29,16,6,N) form they
 need ``take(..., dim=-1)`` as well.

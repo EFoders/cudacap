@@ -1,7 +1,7 @@
 """Stage B (PyTorch) VERSY vs. the tier-B oracle dump and vs. Stage A.
 
 Runs on CPU always and CUDA when available (the Stage B production target).
-Same fidelity bar as the scalar port (tests/stage_a/test_versy.py): the
+Same fidelity bar as the scalar port (tests/scalar/test_versy.py): the
 per-gamma floored-ULP bars encode the VERSY cosf-cancellation floor.
 
 Measured at generation: on BOTH devices Stage B reproduces Stage A /the

@@ -1,5 +1,5 @@
 // LSMOOTH — the long-path/short-path blend (VOA memo, 15 January 1991); the
-// CUDA C twin of stage_a/lsmooth.py.
+// CUDA C twin of scalar/lsmooth.py.
 //
 // Between 7000 and 10000 km neither propagation model is right, so LUFFY runs
 // its whole frequency loop TWICE -- once with IPFLAG 100 and once with 200 --
@@ -276,7 +276,7 @@ __device__ inline int blend(CircuitState* c, const CircuitTables* t,
 
 // Whether this circuit runs both models and blends them.  The band is
 // INCLUSIVE at both ends here; the smoothing itself excludes 10000 km.
-// (Carried for parity with stage_a/lsmooth.py; LUFFY inlines the same test.)
+// (Carried for parity with scalar/lsmooth.py; LUFFY inlines the same test.)
 __device__ inline bool wants_smoothing(const CircuitState* c) {
     return c->mspec == 121 && 7000.0f <= c->gcdkm && c->gcdkm <= 10000.0f;
 }

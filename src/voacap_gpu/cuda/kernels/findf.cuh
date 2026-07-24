@@ -1,5 +1,5 @@
 // FINDF — area coverage: find all propagation modes at the operating
-// frequency.  The CUDA C twin of stage_a/findf.py (mirrors findf.for, with
+// frequency.  The CUDA C twin of scalar/findf.py (mirrors findf.for, with
 // SANG/PENANG already run, /REFLX/ 1-based, IAFTXR stored on ReflxState).
 //
 // For control area K and the operating frequency FREQ, FINDF walks the

@@ -4,7 +4,7 @@ The per-mode loss budget: the deepest transcendental chain in the program --
 COS/SIN/SQRT geometry, two ``**1.98`` powers, ALOG/EXP for the collision
 frequency and the E-bending term, up to six ALOG10s through PRBMUF, then seven
 comparably sized terms summed into XTLOS.  Against the ORACLE that costs a ULP
-budget (see tests/stage_a/test_regmod.py); against Stage A it costs nothing,
+budget (see tests/scalar/test_regmod.py); against Stage A it costs nothing,
 because both sides evaluate every transcendental in binary64 and round once --
 so the bar here is the ordinary Stage C one, bit-identity on every /ZON/ field
 of every slot, including the ones REGMOD never writes.

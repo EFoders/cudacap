@@ -1,5 +1,5 @@
 // NOISY — general two-variable Fourier-series evaluator over (latitude,
-// longitude); the CUDA C twin of stage_a/noisy.py.  KJ selects the
+// longitude); the CUDA C twin of scalar/noisy.py.  KJ selects the
 // coefficient map: 1-6 atmospheric noise, 7 the land-mass map, 8 the F2
 // height-of-max / semithickness ratio (RAT) that TIMVAR needs.
 //

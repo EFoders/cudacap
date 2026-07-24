@@ -5,7 +5,7 @@ averaged into a single geometry and priced end to end through CONVH, GETTOP,
 TABS, BABS, PRBMUF and PWRDB -- all six real, so this pins the composition as
 well as the arithmetic.  Against the oracle that costs a ULP budget (BABS's
 AF multiplied back out by DF*RZ, and PTOT's near-total cosine cancellation --
-see tests/stage_a/test_lngpat.py); against Stage A it costs nothing, and the
+see tests/scalar/test_lngpat.py); against Stage A it costs nothing, and the
 bar is bit-identity on the whole of /allMODE/ and /SIGD/, with /RON//GEOG/,
 /LPATH/, /LOSX/, /REFLX/, /MUFS/ and /ANOIS/ compared against their entry
 copies to prove nothing else moved.

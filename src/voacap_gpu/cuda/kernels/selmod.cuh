@@ -1,5 +1,5 @@
 // SELMOD — select the controlling sample area (JMODE); the CUDA C twin of
-// stage_a/selmod.py.  Pure comparison on KFX and the FI criticals: KFX==1
+// scalar/selmod.py.  Pure comparison on KFX and the FI criticals: KFX==1
 // has only one area; KFX==2 lets the higher E critical decide between the
 // two ends; KFX>=3 compares the ends (areas 1 and 3) on the F2 critical,
 // with the E critical breaking a tie within 0.01 MHz.  Returns the 1-based

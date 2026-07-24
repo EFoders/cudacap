@@ -1,6 +1,6 @@
 """PENANG Stage C vs Stage A — per-layer penetration angles, one thread/case.
 
-Cases come from the penang golden dump exactly as tests/stage_a/test_penang.py
+Cases come from the penang golden dump exactly as tests/scalar/test_penang.py
 builds them (ionogram via LECDEN+GENION, DSKPKM/DMAXKM preset as FINDF does);
 expected values are Stage A run in-process on the same cases.  The device gets
 the packed LayerState/ReflxState structs (see state.py), one pair per thread,

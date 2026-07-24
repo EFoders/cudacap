@@ -1,5 +1,5 @@
 """Stage B (PyTorch, batched) port of VERSY
-(cross-checks src/voacap_gpu/stage_a/versy.py).
+(cross-checks src/voacap_gpu/scalar/versy.py).
 
 VERSY evaluates the CCIR/URSI geographic series at one location; in Area
 mode it runs at every lat/lon grid point, so this is the prime GPU target.

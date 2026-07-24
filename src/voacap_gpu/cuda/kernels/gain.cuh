@@ -1,5 +1,5 @@
 // GAIN — antenna power gain and ground reflection loss (Module 5); the CUDA C
-// twin of stage_a/gain.py.  Two independent routines behind one Fortran entry
+// twin of scalar/gain.py.  Two independent routines behind one Fortran entry
 // point, selected by ITR:
 //
 //   * ITR < 0  -> ground_loss(): Fresnel reflection loss for a sample area
@@ -9,7 +9,7 @@
 //
 // THE ANTENNA TABLES ARE SHARED, NOT PER-THREAD.  A circuit has one transmit
 // and one receive antenna, so ARRAY/AEFF stay a single device-resident table
-// and only the indices into it are per-thread (see stage_b/gain.py's
+// and only the indices into it are per-thread (see batched/gain.py's
 // BatchedCantenna for the same convention).  They pass as flat row-major
 // pointers with A = numants:
 //     array   (31, 92, A+1)  element [i, j, iat] = array[(i*92 + j)*(A+1) + iat]
@@ -40,7 +40,7 @@
 #include "f32math.cuh"
 #include "state.cuh"
 
-// OFFAZIM sentinel for an area-coverage antenna (stage_a/antennastate.py).
+// OFFAZIM sentinel for an area-coverage antenna (scalar/antennastate.py).
 #define VC_AREA_COVERAGE (-999.0f)
 
 // GAIN's ITR<0 branch: ground reflection loss in dB for sample area IG.

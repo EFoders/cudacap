@@ -11,7 +11,7 @@ THE OPTION SET BELOW IS THE FIDELITY CONTRACT.  ``--fmad=false`` is the one
 that bites: NVRTC contracts ``a*b + c`` into a fused multiply-add by
 default, which skips the intermediate rounding and silently breaks
 bit-exactness against Stage A on essentially every polynomial in the
-program.  ``tests/stage_c/test_f32math.py`` carries a statistical tripwire
+program.  ``tests/cuda/test_f32math.py`` carries a statistical tripwire
 for it.  Never compile a Stage C source through a bare ``cp.RawModule``.
 """
 

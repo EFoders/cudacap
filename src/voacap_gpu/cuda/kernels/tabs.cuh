@@ -1,5 +1,5 @@
 // TABS — absorption loss per kilometre for the leg that misses the D region;
-// the CUDA C twin of stage_a/tabs.py.  BABS's twin, character for character
+// the CUDA C twin of scalar/tabs.py.  BABS's twin, character for character
 // the same geometry, differing in one number: the absorption index is the
 // hardcoded XI = 0.1 rather than the path average ACAV.
 //

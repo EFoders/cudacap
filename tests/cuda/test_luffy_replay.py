@@ -13,7 +13,7 @@ because Fortran COMMON persists: every deck gives 9 frequencies, so FREL(10),
 FREL(11) and FREL(13) are zero and LUFFY skips those columns, leaving the
 previous hour's numbers in place; the /DON/ decile triple D10R/D50R/D90R
 carries over the same way.  A fresh Circuit per hour would zero them and
-disagree with the oracle (``tests/stage_a/test_luffy_replay.py`` documents
+disagree with the oracle (``tests/scalar/test_luffy_replay.py`` documents
 this).  So the host walks each deck's 24 hours in order with Stage A --
 applying the captured entry state, SNAPSHOTTING the Circuit as the device's
 entry state, then running ``luffy`` to get the expected exit state -- which
@@ -59,7 +59,7 @@ def _deck_cases(deck):
 
     ``pack_circuit`` returns a PAIR -- the CircuitState buffer and the /RAYS/
     buffer -- because /RAYS/ travels to the device structure-of-arrays rather
-    than inside CircuitState (see ``stage_c/driver.py``).  Both halves are
+    than inside CircuitState (see ``cuda/driver.py``).  Both halves are
     carried, and both are compared: the two together are still the whole
     Stage A ``Circuit``, cell for cell.
 

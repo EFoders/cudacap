@@ -1,5 +1,5 @@
 // GENION — generates the ionogram for sample area K; the CUDA C twin of
-// stage_a/genion.py (genion.for).
+// scalar/genion.py (genion.for).
 //
 // Lays out 30 vertical-sounding frequencies FVERT across the D-E tail, the
 // E nose, and the F region from the E/F1/F2 critical frequencies FI(1/2/3,K)

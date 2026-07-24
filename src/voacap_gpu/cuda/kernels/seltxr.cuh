@@ -1,5 +1,5 @@
 // SELTXR — choose one ray at each long-path end; the CUDA C twin of
-// stage_a/seltxr.py (SELTXR_ORIG; the vendored version string dispatches to
+// scalar/seltxr.py (SELTXR_ORIG; the vendored version string dispatches to
 // the original, not the Alex variant).  Three tie-breaks: smallest gain
 // minus loss within GMIN, then closest to specular reflection within YMIN,
 // then closest to the a-priori optimum take-off angle DELOPT.

@@ -3,7 +3,7 @@
 Stage C's round trip used to move all 55,652 bytes of per-thread state up and
 all 55,652 back.  At 32,256 circuit-hours that is 1.8 GB each way against a
 kernel of a few hundred milliseconds, so the bus, not the arithmetic, set the
-throughput.  ``stage_c/driver.py`` now declares an INPUT SET -- the fields
+throughput.  ``cuda/driver.py`` now declares an INPUT SET -- the fields
 LUFFY reads before it writes them -- and ``upload="inputs"`` sends only those,
 3,228 bytes a thread, zeroing the rest on the device with a memset.
 ``fetch_results`` brings back 1,700 instead of 55,652.

@@ -1,5 +1,5 @@
 """Stage B (PyTorch, batched) MAGFIN/MAGVAR
-(cross-checks src/voacap_gpu/stage_a/magfin.py).
+(cross-checks src/voacap_gpu/scalar/magfin.py).
 
 The Jensen-Cain geomagnetic field (degree/order 6) and its MAGVAR wrapper,
 batched over grid points.  The Legendre P/DP recurrences are indexed by the

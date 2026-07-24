@@ -1,5 +1,5 @@
 // SYSSY — table lookup for excess-system-loss deciles and prediction errors;
-// the CUDA C twin of stage_a/syssy.py.  Indexes the CCIR SYS(9,16,6) and
+// the CUDA C twin of scalar/syssy.py.  Indexes the CCIR SYS(9,16,6) and
 // PERR(9,4,6) tables (loaded by REDMAP into /TWO/) by geomagnetic latitude G
 // (radians) and reflection-area local time PT, with the reflection-area
 // distance index NN (2 short, 5 long).  When no coefficient data is loaded

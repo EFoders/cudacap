@@ -1,5 +1,5 @@
 // GENOIS — atmospheric + galactic + man-made noise combined into one
-// distribution (ITS Report 87-212); the CUDA C twin of stage_a/genois.py.
+// distribution (ITS Report 87-212); the CUDA C twin of scalar/genois.py.
 //
 // Each component is converted from (median, decile pair) to a linear mean A
 // and variance V, those are summed, and the sum is converted back assuming
