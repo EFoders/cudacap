@@ -71,8 +71,8 @@ def main():
 
     import cupy as cp
 
-    from voacap_gpu.stage_c import driver
-    from tests.stage_c.test_luffy_replay import _replay
+    from voacap_gpu.cuda import driver
+    from tests.cuda.test_luffy_replay import _replay
 
     w = _replay()
     n0 = len(w["entries"])

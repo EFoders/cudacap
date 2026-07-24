@@ -14,9 +14,9 @@ import time
 import numpy as np
 import torch
 
-from voacap_gpu.stage_a.redmap import redmap
-from voacap_gpu.stage_a.virtim import virtim
-from voacap_gpu.stage_b.area import area_iono_map
+from voacap_gpu.scalar.redmap import redmap
+from voacap_gpu.scalar.virtim import virtim
+from voacap_gpu.batched.area import area_iono_map
 
 COEFFS = (pathlib.Path(__file__).resolve().parents[1] / "reference"
           / "voacapl" / "voacapl" / "itshfbc" / "coeffs")

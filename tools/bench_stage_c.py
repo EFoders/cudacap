@@ -149,7 +149,7 @@ def _workload():
     (entry, exit) pairs.  Benchmarking anything else would be measuring a
     workload nothing has verified.
     """
-    from tests.stage_c.test_luffy_replay import _replay
+    from tests.cuda.test_luffy_replay import _replay
     return _replay()
 
 
@@ -178,7 +178,7 @@ def _time_warp(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps, wpb,
     """
     import cupy as cp
 
-    from voacap_gpu.stage_c.driver import stage_luffy
+    from voacap_gpu.cuda.driver import stage_luffy
 
     run, state = stage_luffy(bufs, rays, ipflags, iono, iono_idx, ant,
                              ant_idx, warp=True, warps_per_block=wpb,
@@ -200,7 +200,7 @@ def _time_kernel(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps,
     """
     import cupy as cp
 
-    from voacap_gpu.stage_c.driver import launch_luffy, stage_luffy
+    from voacap_gpu.cuda.driver import launch_luffy, stage_luffy
 
     run, state = stage_luffy(bufs, rays, ipflags, iono, iono_idx, ant,
                              ant_idx, block=block)
@@ -253,7 +253,7 @@ def _trip_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
     """
     import cupy as cp
 
-    from voacap_gpu.stage_c.driver import (RESULT_BYTES_PER_THREAD,
+    from voacap_gpu.cuda.driver import (RESULT_BYTES_PER_THREAD,
                                            STATE_BYTES_PER_THREAD,
                                            UPLOAD_BYTES_PER_THREAD,
                                            LuffyArena, fetch_luffy,
@@ -317,7 +317,7 @@ def _warp_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
     """
     import cupy as cp
 
-    from voacap_gpu.stage_c.driver import STATE_BYTES_PER_THREAD
+    from voacap_gpu.cuda.driver import STATE_BYTES_PER_THREAD
 
     print(f"{'circ-hours':>11} {'thread':>9} {'us/ev':>7} "
           f"| {'warp':>9} {'us/ev':>7} | {'packed':>9} {'us/ev':>7} "
@@ -375,7 +375,7 @@ def main():
                     help="warps per block for the warp kernel")
     args = ap.parse_args()
 
-    from voacap_gpu.stage_c.driver import (CIRCUIT_DTYPE,
+    from voacap_gpu.cuda.driver import (CIRCUIT_DTYPE,
                                            RESULT_BYTES_PER_THREAD,
                                            STATE_BYTES_PER_THREAD,
                                            UPLOAD_BYTES_PER_THREAD,

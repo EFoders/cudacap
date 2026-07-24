@@ -71,10 +71,10 @@ def _grid(n):
 
 def bench_front(n, device):
     """Grid -> layer params -> profile -> ionogram -> reflectrix."""
-    from voacap_gpu.stage_b.area import build_map
-    from voacap_gpu.stage_b.fobby import fobby_batch
-    from voacap_gpu.stage_b.genion import genion_batch
-    from voacap_gpu.stage_b.profile import lecden_batch
+    from voacap_gpu.batched.area import build_map
+    from voacap_gpu.batched.fobby import fobby_batch
+    from voacap_gpu.batched.genion import genion_batch
+    from voacap_gpu.batched.profile import lecden_batch
 
     lat, lon = _grid(n)
     ang = torch.as_tensor(ANGLES, device=device)
@@ -93,10 +93,10 @@ def bench_front(n, device):
 
 def _ray_inputs(n, device):
     """A realistic FINDF input set, built once and reused."""
-    from voacap_gpu.stage_a.sang import ANG as SANG_ANG
-    from voacap_gpu.stage_b.area import build_map
-    from voacap_gpu.stage_b.genion import genion_batch
-    from voacap_gpu.stage_b.profile import lecden_batch
+    from voacap_gpu.scalar.sang import ANG as SANG_ANG
+    from voacap_gpu.batched.area import build_map
+    from voacap_gpu.batched.genion import genion_batch
+    from voacap_gpu.batched.profile import lecden_batch
 
     lat, lon = _grid(n)
     _, p = build_map(COEFFS, "CCIR", MONTH, SSN, GMT, lat, lon, device=device)
@@ -109,7 +109,7 @@ def _ray_inputs(n, device):
     ang = torch.as_tensor(np.asarray(SANG_ANG, dtype=np.float32),
                           device=device).unsqueeze(1).expand(nang,
                                                              n).contiguous()
-    from voacap_gpu.stage_b.fobby import fobby_batch
+    from voacap_gpu.batched.fobby import fobby_batch
     ifob = fobby_batch(ang[:, 0].contiguous(), fvert, htrue)
     freq = torch.full((n,), 14.1, device=device)
     amind = torch.full((n,), 3.0, device=device)
@@ -119,7 +119,7 @@ def _ray_inputs(n, device):
 
 
 def bench_findf(n, device, graph=True):
-    from voacap_gpu.stage_b.findf import findf_batch
+    from voacap_gpu.batched.findf import findf_batch
     args = _ray_inputs(n, device)
     return _time(lambda: findf_batch(*args, use_cuda_graph=graph), device,
                  repeat=2)
@@ -134,10 +134,10 @@ def bench_back(n, device):
     the front half produces one lane per GRID POINT and this consumes one per
     (grid point x frequency).  Synthesising keeps the lane count honest.
     """
-    from voacap_gpu.stage_a.antennastate import CantennaState
-    from voacap_gpu.stage_a.readant import read_antenna
-    from voacap_gpu.stage_b.gain import BatchedCantenna
-    from voacap_gpu.stage_b.regmod import regmod_batch
+    from voacap_gpu.scalar.antennastate import CantennaState
+    from voacap_gpu.scalar.readant import read_antenna
+    from voacap_gpu.batched.gain import BatchedCantenna
+    from voacap_gpu.batched.regmod import regmod_batch
 
     rng = np.random.default_rng(7)
     t = lambda a: torch.as_tensor(np.asarray(a, dtype=np.float32),  # noqa
@@ -197,12 +197,12 @@ def bench_back(n, device):
 
 def bench_scalar_front():
     """Stage A: one circuit, grid params -> ionogram -> reflectrix."""
-    from voacap_gpu.stage_a.f32math import F32
-    from voacap_gpu.stage_a.fobby import fobby
-    from voacap_gpu.stage_a.genion import genion
-    from voacap_gpu.stage_a.layerstate import LayerState
-    from voacap_gpu.stage_a.lecden import lecden
-    from voacap_gpu.stage_a.raysstate import RaysState
+    from voacap_gpu.scalar.f32math import F32
+    from voacap_gpu.scalar.fobby import fobby
+    from voacap_gpu.scalar.genion import genion
+    from voacap_gpu.scalar.layerstate import LayerState
+    from voacap_gpu.scalar.lecden import lecden
+    from voacap_gpu.scalar.raysstate import RaysState
 
     def run():
         s = LayerState(km=1)

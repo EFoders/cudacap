@@ -69,9 +69,9 @@ def main():
 
     import cupy as cp
 
-    import voacap_gpu.stage_c.driver as drv
-    from tests.stage_c.test_fastmath import fast_kernel_module, fast_math
-    from tests.stage_c.test_luffy_replay import _replay
+    import voacap_gpu.cuda.driver as drv
+    from tests.cuda.test_fastmath import fast_kernel_module, fast_math
+    from tests.cuda.test_luffy_replay import _replay
 
     w = _replay()
     base, base_rays = w["entries"], w["entries_rays"]
