@@ -47,6 +47,72 @@ is LUFFY's one-character model tag, "" / " " / "S" / "L" / "M".  Rather than
 duplicate ``state.py``'s logic this module calls the same packers with MDL
 blanked and then overwrites that one column with ``MDL_CODE`` — which is what
 ``cuda/circuit.cuh``'s ``VC_MDL_*`` constants hold.
+
+MOST OF THE 55,652 BYTES NEVER NEEDED TO CROSS THE BUS
+------------------------------------------------------
+Measured at 32,256 circuit-hours, the round trip was ~618 ms of which the
+kernel is ~127 ms; the other ~490 ms was 1.8 GB of per-thread state going up
+and 1.8 GB coming back.  Almost none of it is INPUT.  ``UPLOAD_FIELDS`` below
+is the set that is, established by experiment rather than by reading the
+source: zero one field in all 504 replay circuit-hours, launch, and diff the
+WHOLE output against the clean run.  A field whose zeroing changes nothing
+else is not read.  ``tests/stage_c/test_input_set.py`` pins the result, and
+``tools/bench_stage_c.py --trip`` measures what it buys.
+
+The three buckets that came out of that sweep, for the whole CircuitState and
+the whole of /RAYS/:
+
+* **INPUT** — read before it is written.  ``INPUT_FIELDS``.
+* **ECHO** — never read, but not fully overwritten either, so its exit value
+  still depends on its entry value (``reflx``, ``modes``, ``zon``, ``allm``,
+  most of ``son``, ``losx``, the ``layers`` profile arrays, and /RAYS/ IFOB).
+  Scratch as far as the kernel is concerned.
+* **DEAD** — never read AND fully rewritten (``anois``, ``ndiag``, ``sigd``,
+  ``ton``, ``frq.jmode`` ...).
+
+**/RAYS/ IS NOT AN INPUT except for its first 168 bytes.**  NANG and ANG are
+read before FOBBY rewrites them; IFOB — 30,504 of the 30,672 bytes, 55% of
+the whole per-thread state — is pure scratch.
+
+THREE THINGS THE EXPERIMENT CANNOT SEE, AND WHY THEY ARE UPLOADED ANYWAY
+-----------------------------------------------------------------------
+``layers.fs``, ``layers.ielect`` and ``muf.afmuf`` are zero in every one of
+the 21 replay decks, so zeroing them is a no-op and the sweep calls them
+dead.  They are read (esmod.cuh/regmod.cuh, lecden.cuh, inmuf.cuh/settxr.cuh)
+and NOTHING in the port ever writes them, so for a caller who sets them they
+are inputs.  132 bytes; they are carried.  The same argument covers the four
+``muf`` MUF ladders and ``time.it`` that ``frqcom`` reads on the LUF arms
+(IPFLAG 300/400), which the replay does not exercise at all.
+
+``CARRY_FIELDS`` is a different thing again: fields the kernel does NOT read,
+but which appear in ``RESULT_FIELDS`` and are only partly written, so the
+answer the host reads back still contains their entry values.  /SON/ is the
+whole result table and LUFFY skips every frequency slot whose FREL is zero,
+leaving the previous hour's numbers in place; /MUFS/ XLUF is untouched
+altogether on the system-performance arms, where SETOUT's ``xluf[:] = -1``
+preset has to survive.  Carrying them is not about fidelity inside the
+kernel; it is about the result table being complete.  Note that a ZERO probe
+misses this entirely -- the skipped /SON/ columns happen to hold zeros in the
+replay decks -- which is why the pinning test poisons with NaN.
+
+TWO UPLOAD MODES, TWO FETCH PATHS
+---------------------------------
+``stage_luffy(..., upload="full")`` is the old behaviour and stays the
+default: every byte up, so ``fetch_luffy`` can return every byte back and the
+replay can compare all 7,012,152 cells.  ``upload="inputs"`` sends 3,228
+bytes per thread and ``cp.zeros`` the rest on the device (a memset, not a
+copy).  ``fetch_results`` brings back 1,700 bytes -- /SON/, XLUF, JMODE and
+the status -- which is what a production caller actually wants.  The two
+modes agree bit-for-bit on those results across all 504 replay circuit-hours;
+that is the test that makes the reduction safe.
+
+``LuffyArena`` is the third piece: the device buffers and the shared tables
+allocated once and reused, so a caller sweeping batches pays neither the
+allocation nor the 1.8 GB memset per batch.  It never re-zeroes between
+submissions, which is the same claim as the input set made once more --
+nothing outside ``UPLOAD_FIELDS`` is read, so the previous batch's leftovers
+are as good as zeros.  Measured at 32,256 circuit-hours the two ends together
+go from 515 ms to 98 ms, **5.2x**; the round trip from 901 to 472 ms.
 """
 
 import numpy as np
@@ -130,6 +196,153 @@ _RAYS_CHUNK = max(1, 512_000_000 // RAYS_DTYPE.itemsize)
 
 # One thread's total state, for callers budgeting device memory.
 STATE_BYTES_PER_THREAD = CIRCUIT_DTYPE.itemsize + RAYS_DTYPE.itemsize
+
+
+# ---------------------------------------------------------------------------
+# THE INPUT SET — measured, not guessed.  See the module docstring.
+# ---------------------------------------------------------------------------
+
+# Read before written.  Every one of these was established by zeroing it in
+# all 504 replay circuit-hours and watching the rest of the output move,
+# except where marked.
+INPUT_FIELDS = (
+    # --- /LAYER/ -----------------------------------------------------------
+    "layers.km",                # the sample-area count; zeroing it hangs the
+    "layers.kfx",               # area-selection loop, which is its own proof
+    "layers.iedp",
+    "layers.glat", "layers.gyz",
+    "layers.fi", "layers.yi", "layers.hi",
+    "layers.fs",                # STATIC: read by esmod/regmod, never written
+    "layers.ielect",            # STATIC: read by lecden, never written
+    "layers.clck", "layers.sigpat", "layers.epspat",
+    # --- /MUFS/ ------------------------------------------------------------
+    # The four ladders FRQCOM reads at TIME.IT are STATIC additions: they are
+    # only read on the LUF arms (IPFLAG 300/400) and the replay runs 100/200.
+    "muf.emuf", "muf.f2muf", "muf.allmuf", "muf.hpf",
+    "muf.modmuf", "muf.sigl", "muf.sigu",
+    "muf.delmuf", "muf.hpmuf", "muf.htmuf", "muf.fvmuf",
+    "muf.afmuf",                # STATIC: read by inmuf/settxr, never written
+    "muf.nhopmf", "muf.yfot", "muf.yhpf", "muf.ymuf",
+    # --- /FRQ/, /TIME/, /LPATH/ --------------------------------------------
+    "frq.frel",                 # THE frequency list
+    "time.it",                  # STATIC: FRQCOM's index, LUF arms only
+    "time.gmtr",
+    "lpath.delopt", "lpath.gmin", "lpath.ymin",
+)
+
+# ... plus every loose scalar.  Fourteen of the eighteen are measured inputs;
+# JLONG is measured dead and TLONG / NYEAR_IS_2089 / INFO are zero in every
+# replay deck so the sweep cannot speak for them.  All eighteen are 72 bytes
+# together, so the whole block is carried rather than argued about.
+INPUT_FIELDS += tuple(n for n, _ in _SCALARS)
+
+# Not read by the kernel, but only PARTLY written, and inside RESULT_FIELDS --
+# so the result table the host reads back still carries their entry values.
+# This is the Fortran COMMON persistence the replay depends on, and it is the
+# reason /SON/ travels UP as well as down: a deck gives nine frequencies, so
+# FREL(10), FREL(11) and FREL(13) are zero, LUFFY skips those columns, and
+# the previous hour's numbers have to still be sitting in them afterwards.
+# /MUFS/ XLUF is the same story one field at a time: nothing on the
+# system-performance arms writes it, and SETOUT's ``xluf[:] = -1`` preset has
+# to survive.  (Zeroing /SON/ looks harmless on the replay decks -- the
+# skipped columns happen to hold zeros -- which is exactly why the pinning
+# test poisons with NaN and not with zero.)
+CARRY_FIELDS = ("muf.xluf", "son")
+
+UPLOAD_FIELDS = INPUT_FIELDS + CARRY_FIELDS
+
+# /RAYS/: NANG and ANG are read before FOBBY rewrites them.  IFOB -- 30,504
+# bytes, 55% of the whole per-thread state -- is not.
+RAYS_UPLOAD_FIELDS = ("nang", "ang")
+
+# What a production caller wants back: the per-frequency results table, the
+# LUF, and which sample area controlled the path.  (The status is separate --
+# it is its own device array.)
+RESULT_FIELDS = ("son", "muf.xluf", "frq.jmode")
+
+
+def leaves_of(dtype, prefix=""):
+    """Every scalar-or-subarray leaf path of a (nested) structured dtype."""
+    out = []
+    for name in dtype.names:
+        sub = dtype.fields[name][0]
+        if sub.names:
+            out.extend(leaves_of(sub, f"{prefix}{name}."))
+        else:
+            out.append(prefix + name)
+    return tuple(out)
+
+
+def expand_fields(dtype, paths):
+    """Field paths -> the leaf paths they cover (some entries are structs)."""
+    all_leaves = leaves_of(dtype)
+    out = []
+    for p in paths:
+        hit = [l for l in all_leaves if l == p or l.startswith(p + ".")]
+        assert hit, f"{p} is not a field of the dtype"
+        out.extend(hit)
+    assert len(set(out)) == len(out), "a field is covered twice"
+    return tuple(out)
+
+
+def _span(dtype, path):
+    """(word offset, word count) of a (possibly nested) field inside dtype."""
+    off, dt = 0, dtype
+    for p in path.split("."):
+        sub, o = dt.fields[p][0], dt.fields[p][1]
+        off += o
+        dt = sub
+    assert off % 4 == 0 and dt.itemsize % 4 == 0, path
+    return off // 4, dt.itemsize // 4
+
+
+def _merge(spans):
+    """Sorted (offset, count) spans -> the same words as maximal runs."""
+    out = []
+    for s, ln in sorted(spans):
+        if out and out[-1][0] + out[-1][1] == s:
+            out[-1][1] += ln
+        else:
+            assert not out or s > out[-1][0] + out[-1][1], f"overlap at {s}"
+            out.append([s, ln])
+    return tuple((s, ln) for s, ln in out)
+
+
+def _columns(runs, dtype, paths):
+    """path -> (column in the compacted (N, m) buffer, word count)."""
+    base, j = {}, 0
+    for s, ln in runs:
+        base[s] = j
+        j += ln
+    out = {}
+    for p in paths:
+        s, ln = _span(dtype, p)
+        for rs, rln in runs:
+            if rs <= s < rs + rln:
+                out[p] = (base[rs] + (s - rs), ln)
+                break
+        else:                                        # pragma: no cover
+            raise AssertionError(p)
+    return out
+
+
+_CIRC_WORDS = CIRCUIT_DTYPE.itemsize // 4
+# The leaf-level expansion of the two declarations, for callers that need to
+# ask "is THIS field sent?" (tests/stage_c/test_input_set.py does).
+UPLOAD_LEAVES = expand_fields(CIRCUIT_DTYPE, UPLOAD_FIELDS)
+RAYS_UPLOAD_LEAVES = expand_fields(RAYS_DTYPE, RAYS_UPLOAD_FIELDS)
+_UPLOAD_RUNS = _merge(_span(CIRCUIT_DTYPE, p) for p in UPLOAD_FIELDS)
+_UPLOAD_IDX = np.concatenate([np.arange(s, s + ln, dtype=np.int64)
+                              for s, ln in _UPLOAD_RUNS])
+_RAYS_UPLOAD_RUNS = _merge(_span(RAYS_DTYPE, p) for p in RAYS_UPLOAD_FIELDS)
+_RESULT_RUNS = _merge(_span(CIRCUIT_DTYPE, p) for p in RESULT_FIELDS)
+_RESULT_COLS = _columns(_RESULT_RUNS, CIRCUIT_DTYPE, RESULT_FIELDS)
+_RESULT_WORDS = sum(ln for _, ln in _RESULT_RUNS)
+
+# What each direction costs per circuit-hour, for callers budgeting PCIe.
+UPLOAD_BYTES_PER_THREAD = 4 * (len(_UPLOAD_IDX)
+                               + sum(ln for _, ln in _RAYS_UPLOAD_RUNS))
+RESULT_BYTES_PER_THREAD = 4 * (_RESULT_WORDS + 1)       # + the status word
 
 # Flat table extents, one circuit's worth of each (redmap.py shapes).
 _IONO_TABLES = (("fam", (14, 12)), ("dud", (5, 12, 5)),
@@ -359,6 +572,121 @@ def _rays_to_soa(rays_bufs, n):
     return d_soa
 
 
+# ---------------------------------------------------------------------------
+# The compacted-block scatter/gather, one launch each
+# ---------------------------------------------------------------------------
+# CircuitState's input words are 19 disjoint runs and its result words 3, so
+# the obvious implementation is one strided device copy per run.  That is 19
+# kernel launches per upload, and on a busy card those launches queue: at 504
+# threads the run-at-a-time version cost MORE than shipping the whole 55,652
+# bytes.  One launch over a word-index map instead.  This is integer address
+# arithmetic only -- no float touches it -- so the fidelity contract in
+# compile.py has nothing to bite on.
+_XFER_SRC = r'''
+extern "C" __global__ void scatter_words(
+        int* dst, const int* src, const int* idx, int m, int stride, long tot) {
+    long g = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= tot) return;
+    long i = g / m;                         // which thread's state
+    int j = (int)(g - i * m);               // which word of the compact block
+    dst[i * (long)stride + idx[j]] = src[g];
+}
+
+extern "C" __global__ void gather_words(
+        const int* src, int* dst, const int* idx, int m, int stride, long tot) {
+    long g = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= tot) return;
+    long i = g / m;
+    int j = (int)(g - i * m);
+    dst[g] = src[i * (long)stride + idx[j]];
+}
+'''
+
+
+def _xfer(name):
+    return load(_XFER_SRC).get_function(name)
+
+
+def _word_map(runs):
+    """Contiguous (offset, count) runs -> the flat int32 word-index map."""
+    return np.concatenate([np.arange(s, s + ln, dtype=I32)
+                           for s, ln in runs])
+
+
+_UPLOAD_MAP = _word_map(_UPLOAD_RUNS)
+_RESULT_MAP = _word_map(_RESULT_RUNS)
+_MAP_CACHE = {}
+
+
+def _device_map(key, host_map):
+    """The word-index map — a few hundred int32, uploaded once per process."""
+    import cupy as cp
+    d = _MAP_CACHE.get(key)
+    if d is None:
+        d = _MAP_CACHE[key] = cp.asarray(host_map)
+    return d
+
+
+def _write_rays_inputs(d_soa, rays_bufs, n):
+    """Send ``RAYS_UPLOAD_FIELDS`` into an existing SoA buffer, nothing else.
+
+    NANG + ANG are 42 words, so the transpose is done on the HOST -- 168 bytes
+    a thread is nothing to gather, and it keeps the device side to one
+    contiguous copy per run.  IFOB is scratch and is not touched.
+    """
+    import cupy as cp
+
+    words = rays_bufs.view(np.int32).reshape(n, _RAYS_WORDS)
+    for s, ln in _RAYS_UPLOAD_RUNS:
+        d_soa[s:s + ln, :] = cp.asarray(
+            np.ascontiguousarray(words[:, s:s + ln].T))
+
+
+def _write_circuit_inputs(d_circ, bufs, n):
+    """Send ``UPLOAD_FIELDS`` into an existing device CircuitState array.
+
+    ONE host-side gather into a compacted ``(N, m)`` int32 block, ONE H2D of
+    that block, ONE scatter kernel.  Everything outside ``UPLOAD_FIELDS`` is
+    left exactly as it was, which costs no PCIe at all.
+
+    The gather is a CONCATENATION OF THE 19 CONTIGUOUS RUNS, not a fancy-index
+    over the 409 word offsets, and that is not a style preference: at 32,256
+    circuit-hours the fancy-index form takes 163 ms and this one 31 ms.  The
+    element-at-a-time path costs more on the host than the bytes it saves on
+    the bus.
+    """
+    import cupy as cp
+
+    m = len(_UPLOAD_IDX)
+    words = bufs.view(np.int32).reshape(n, _CIRC_WORDS)
+    src = np.concatenate([words[:, s:s + ln] for s, ln in _UPLOAD_RUNS],
+                         axis=1)
+    d_src = cp.asarray(src)
+    tot = m * n
+    _xfer("scatter_words")(((tot + 255) // 256,), (256,),
+                           (d_circ.view(np.int32), d_src,
+                            _device_map("upload", _UPLOAD_MAP), I32(m),
+                            I32(_CIRC_WORDS), np.int64(tot)))
+
+
+def _rays_inputs_to_soa(rays_bufs, n):
+    """A fresh zeroed SoA /RAYS/ buffer carrying only the input words."""
+    import cupy as cp
+
+    d_soa = cp.zeros((_RAYS_WORDS, n), np.int32)
+    _write_rays_inputs(d_soa, rays_bufs, n)
+    return d_soa
+
+
+def _circuit_inputs_to_device(bufs, n):
+    """A fresh zeroed device CircuitState array carrying only the inputs."""
+    import cupy as cp
+
+    d_circ = cp.zeros(n * CIRCUIT_DTYPE.itemsize, np.uint8)
+    _write_circuit_inputs(d_circ, bufs, n)
+    return d_circ
+
+
 def _rays_from_soa(d_soa, n):
     """The inverse: one (words, N) int32 device array -> (N,) RAYS_DTYPE.
 
@@ -404,13 +732,24 @@ SMOOTHSTORE_BYTES = (20 * 14 * 3 + 5 * 14) * 4
 
 
 def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
-                block=32, warp=False, warps_per_block=4):
+                block=32, warp=False, warps_per_block=4, upload="full"):
     """Move one batch to the device; return the staged launch, not the result.
 
     Split out of ``launch_luffy`` so a benchmark can time the KERNEL without
     the bus.  That distinction turned out to matter a great deal: at 32k
     threads the whole ``launch_luffy`` takes ~600 ms of which the kernel is
     ~125 ms, so timing the round trip measures PCIe, not compute.
+
+    ``upload`` picks how much of that state actually crosses the bus:
+
+    * ``"full"`` (the default, and what every existing caller gets) sends all
+      55,652 bytes per thread, so ``fetch_luffy`` can hand back every field
+      and the replay can compare all of them.
+    * ``"inputs"`` sends only ``UPLOAD_FIELDS`` + ``RAYS_UPLOAD_FIELDS`` --
+      3,228 bytes per thread -- and zeroes the rest on the device.  The
+      kernel computes the same answer; see the module docstring and
+      ``tests/stage_c/test_input_set.py``.  Fetch it with ``fetch_results``:
+      ``fetch_luffy`` would return zeros for the scratch the host never sent.
 
     ``warp`` selects ``luffy_batch_warp`` (cuda/luffy_warp.cuh) — one WARP per
     circuit-hour, lane L on frequency L+1 — instead of the one-thread-per-
@@ -423,14 +762,19 @@ def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     """
     import cupy as cp
 
+    assert upload in ("full", "inputs"), upload
     bufs = np.ascontiguousarray(bufs)
     rays_bufs = np.ascontiguousarray(rays_bufs)
     assert bufs.dtype == CIRCUIT_DTYPE, bufs.dtype
     assert rays_bufs.dtype == RAYS_DTYPE, rays_bufs.dtype
     n = bufs.shape[0]
     assert rays_bufs.shape[0] == n, (rays_bufs.shape, n)
-    d_circ = cp.asarray(bufs.view(np.uint8))
-    d_soa = _rays_to_soa(rays_bufs, n)
+    if upload == "full":
+        d_circ = cp.asarray(bufs.view(np.uint8))
+        d_soa = _rays_to_soa(rays_bufs, n)
+    else:
+        d_circ = _circuit_inputs_to_device(bufs, n)
+        d_soa = _rays_inputs_to_soa(rays_bufs, n)
     d_nang, d_ang, d_ifob = _rays_views(d_soa)
     d = {k: cp.asarray(v) for k, v in iono.items()}
     a = {k: cp.asarray(v) for k, v in ant.items() if k != "numants"}
@@ -466,7 +810,14 @@ def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
 
 
 def fetch_luffy(state):
-    """The staged device state -> ``(out_bufs, out_rays, status)``."""
+    """The staged device state -> ``(out_bufs, out_rays, status)``.
+
+    THE WHOLE 55,652 bytes a thread, both structs.  Right for the replay,
+    which compares every cell; wrong for production, which wants
+    ``fetch_results``.  After an ``upload="inputs"`` launch the fields the
+    host never sent come back as the zeros the device was memset to, not as
+    the entry values -- that is not a bug, it is the point.
+    """
     import cupy as cp
 
     d_circ, d_soa, d_status, n = state
@@ -476,8 +827,58 @@ def fetch_luffy(state):
     return out, out_rays, cp.asnumpy(d_status)
 
 
+class LuffyResults:
+    """What a production caller reads back: 1,700 bytes a circuit-hour.
+
+    son:    (N,) SON_DTYPE — the per-frequency results table, /SON/ entire
+    xluf:   (N, 25) float32 — /MUFS/ XLUF, the LUF by hour
+    jmode:  (N,) int32 — /FRQ/ JMODE, the controlling sample area
+    status: (N,) int32 — 0 success, non-zero the refusal a callee reported
+    """
+
+    __slots__ = ("son", "xluf", "jmode", "status")
+
+    def __init__(self, son, xluf, jmode, status):
+        self.son, self.xluf = son, xluf
+        self.jmode, self.status = jmode, status
+
+    def __iter__(self):
+        return iter((self.son, self.xluf, self.jmode, self.status))
+
+
+def fetch_results(state):
+    """The staged device state -> ``LuffyResults``: /SON/, XLUF, JMODE, status.
+
+    The result words are scattered through CircuitState, so they are gathered
+    into one compacted ``(N, m)`` device block first and cross the bus as a
+    SINGLE D2H -- 1,700 bytes a circuit-hour against ``fetch_luffy``'s 55,652.
+    """
+    import cupy as cp
+
+    d_circ, _d_soa, d_status, n = state
+    cp.cuda.runtime.deviceSynchronize()
+    gath = cp.empty((n, _RESULT_WORDS), np.int32)
+    tot = _RESULT_WORDS * n
+    _xfer("gather_words")(((tot + 255) // 256,), (256,),
+                          (d_circ.view(np.int32), gath,
+                           _device_map("result", _RESULT_MAP),
+                           I32(_RESULT_WORDS), I32(_CIRC_WORDS),
+                           np.int64(tot)))
+    host = cp.asnumpy(gath)                          # ONE transfer
+    status = cp.asnumpy(d_status)
+
+    def col(path):
+        c, ln = _RESULT_COLS[path]
+        return np.ascontiguousarray(host[:, c:c + ln])
+
+    son = col("son").view(SON_DTYPE).reshape(n)
+    xluf = col("muf.xluf").view(F32)
+    jmode = col("frq.jmode").reshape(n)
+    return LuffyResults(son, xluf, jmode, status)
+
+
 def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
-                 block=32, warp=False, warps_per_block=4):
+                 block=32, warp=False, warps_per_block=4, upload="full"):
     """Run N packed circuit-hours, one thread each.
 
     bufs:      (N,) array of CIRCUIT_DTYPE — the ENTRY states, not mutated
@@ -494,9 +895,122 @@ def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     """
     run, state = stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant,
                              ant_idx, block=block, warp=warp,
-                             warps_per_block=warps_per_block)
+                             warps_per_block=warps_per_block, upload=upload)
     run()
     return fetch_luffy(state)
+
+
+def luffy_results(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
+                  block=32, warp=False, warps_per_block=4):
+    """The production round trip: inputs up, results back, nothing else.
+
+    Same arguments as ``launch_luffy``, same numbers out -- but 3,228 bytes a
+    circuit-hour go up instead of 55,652 and 1,700 come back instead of
+    55,652.  Returns ``LuffyResults``.
+    """
+    run, state = stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant,
+                             ant_idx, block=block, warp=warp,
+                             warps_per_block=warps_per_block,
+                             upload="inputs")
+    run()
+    return fetch_results(state)
+
+
+class LuffyArena:
+    """Device state for a FIXED batch size, allocated and zeroed once.
+
+    ``luffy_results`` still pays two costs that have nothing to do with the
+    answer: 1.8 GB of ``cudaMalloc`` + memset for the scratch every call (at
+    32,256 circuit-hours), and a fresh copy of the shared REDMAP and antenna
+    tables.  Neither depends on the batch.  An arena holds both across
+    submissions, so a caller sweeping many batches of the same size pays them
+    once.
+
+    NOTHING IS RE-ZEROED BETWEEN SUBMISSIONS, and that is the interesting
+    part.  Batch k+1 starts with batch k's scratch still in place.  That is
+    safe for exactly the reason the whole reduction is safe -- no field
+    outside ``UPLOAD_FIELDS`` is read before it is written -- and it is
+    *safer* than uninitialised memory would be, because every leftover word
+    is a value this kernel itself produced, so no integer is out of its own
+    range.  ``tests/stage_c/test_input_set.py`` runs the same batch through an
+    arena twice and requires the second answer to equal the first.
+
+    Usage::
+
+        arena = LuffyArena(n, iono, ant)
+        for batch in batches:
+            res = arena.run(bufs, rays_bufs, ipflags, iono_idx, ant_idx)
+    """
+
+    def __init__(self, n, iono, ant, block=32, warp=False, warps_per_block=4):
+        import cupy as cp
+
+        self.n = int(n)
+        self._d_circ = cp.zeros(self.n * CIRCUIT_DTYPE.itemsize, np.uint8)
+        self._d_soa = cp.zeros((_RAYS_WORDS, self.n), np.int32)
+        self._d_status = cp.full(self.n, -1, np.int32)
+        self._d_ipflag = cp.zeros(self.n, np.int32)
+        self._d_ii = cp.zeros(self.n, np.int32)
+        self._d_ai = cp.zeros(self.n, np.int32)
+        d = {k: cp.asarray(v) for k, v in iono.items()}
+        a = {k: cp.asarray(v) for k, v in ant.items() if k != "numants"}
+        self._tables = (d, a)                    # keep the copies alive
+        d_nang, d_ang, d_ifob = _rays_views(self._d_soa)
+        self._args = (self._d_circ, d_nang, d_ang, d_ifob, self._d_ipflag,
+                      self._d_ii, self._d_ai,
+                      d["fam"], d["dud"], d["fakp"], d["fakmap"], d["hmym"],
+                      d["fakabp"], d["abmap"], d["sys"], d["perr"],
+                      d["f2d111"], a["array"], a["aeff"], a["iats"],
+                      a["xfqs"], a["xfqe"], a["offazim"], a["pwrdba"],
+                      np.int32(ant["numants"]), self._d_status,
+                      np.int32(self.n))
+        if warp:
+            wpb = int(warps_per_block)
+            self._fn = load_kernel().get_function("luffy_batch_warp")
+            self._grid = ((self.n + wpb - 1) // wpb,)
+            self._block = (32 * wpb,)
+            self._shared = wpb * SMOOTHSTORE_BYTES
+        else:
+            self._fn = load_kernel().get_function("luffy_batch")
+            self._grid = ((self.n + block - 1) // block,)
+            self._block = (block,)
+            self._shared = 0
+
+    @property
+    def state(self):
+        """The ``(d_circ, d_soa, d_status, n)`` tuple the fetchers take."""
+        return self._d_circ, self._d_soa, self._d_status, self.n
+
+    def upload(self, bufs, rays_bufs, ipflags, iono_idx, ant_idx):
+        """One batch's INPUTS into the resident buffers.  No launch."""
+        bufs = np.ascontiguousarray(bufs)
+        rays_bufs = np.ascontiguousarray(rays_bufs)
+        assert bufs.dtype == CIRCUIT_DTYPE and bufs.shape[0] == self.n
+        assert rays_bufs.dtype == RAYS_DTYPE and rays_bufs.shape[0] == self.n
+        _write_circuit_inputs(self._d_circ, bufs, self.n)
+        _write_rays_inputs(self._d_soa, rays_bufs, self.n)
+        self._d_ipflag.set(np.ascontiguousarray(ipflags, I32))
+        self._d_ii.set(np.ascontiguousarray(iono_idx, I32))
+        self._d_ai.set(np.ascontiguousarray(ant_idx, I32))
+        self._d_status.fill(-1)
+        return self
+
+    def launch(self):
+        """Run the kernel over whatever is currently in the buffers."""
+        self._fn(self._grid, self._block, self._args, shared_mem=self._shared)
+        return self
+
+    def submit(self, bufs, rays_bufs, ipflags, iono_idx, ant_idx):
+        """Upload one batch's inputs into the resident buffers and launch."""
+        return self.upload(bufs, rays_bufs, ipflags, iono_idx,
+                           ant_idx).launch()
+
+    def results(self):
+        return fetch_results(self.state)
+
+    def run(self, bufs, rays_bufs, ipflags, iono_idx, ant_idx):
+        return self.submit(bufs, rays_bufs, ipflags, iono_idx,
+                           ant_idx).results()
 
 
 def run_luffy(circuits, ipflags, block=32, write_back=True):

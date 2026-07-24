@@ -15,14 +15,39 @@ TWO COLUMNS, AND THE DIFFERENCE BETWEEN THEM IS THE HEADLINE:
 
 * KERNEL is the compute, timed with the batch already resident.
 * TRIP is the same launch plus the 55,652 bytes of per-thread state crossing
-  PCIe in both directions.  That is a harness cost, not an intrinsic one: a
-  production driver builds the state on-device from card inputs and never
-  ships it.
+  PCIe in both directions.
 
 Earlier revisions of this file timed only the round trip and called it
 "kernel", which understated Stage C by a factor of five.  At 32,256 threads
 the round trip is ~600 ms of which the KERNEL is ~125 ms; the other 475 ms is
 1.8 GB up and 1.8 GB back at PCIe speed.
+
+AND MOST OF THOSE 1.8 GB NEVER NEEDED TO GO: ``--trip``
+--------------------------------------------------------
+That per-thread state is almost entirely SCRATCH -- /RAYS/ IFOB alone is
+30,504 bytes, 55% of it, and LUFFY's own FOBBY fills it during setup.  Only
+3,228 bytes are read before they are written, and only 1,700 are wanted back
+(/SON/, XLUF, JMODE and the status).  ``stage_c/driver.py`` declares that
+input set -- measured field by field, pinned by
+``tests/stage_c/test_input_set.py`` -- and ``--trip`` A/Bs the whole state
+both ways against it, with and without a resident ``LuffyArena``.  Both
+columns return bit-identical results; the only thing that differs is how much
+of the bus they use.  Measured (min of 5, ms, on a card another process was
+also using, so the KERNEL column is roughly 3x its idle value):
+
+    circuit-hours     504     8,064    32,256
+    transfer, full   18.8     134.9     514.7
+    transfer, arena  18.6      27.1      98.3
+    speedup          1.01x     4.97x     5.24x
+
+**5.2x off the bus at 32,256**, and nothing at 504 -- at that size the whole
+batch is 28 MB and what is left is launch latency and the shared tables,
+which neither column avoids.  The round trip moves less than the transfer
+does because the kernel is most of it: 901 -> 472 ms, 1.91x, and about 2.9x
+if the kernel is the ~127 ms an idle card gives.  The remaining ~98 ms is
+roughly a third host-side gather, a third the two PCIe hops, and a third the
+scatter/gather kernels; pinned host buffers are the obvious next lever and
+have not been tried.
 
 THE UNIT MATTERS.  The Fortran baseline is 17.5 ms per circuit measured on
 this machine (tools/bench_scenario.py), and that circuit is 24 hours x 28
@@ -181,6 +206,96 @@ def _time_kernel(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps,
     return kern, trip
 
 
+def _best(fn, reps):
+    """Min of `reps`, not the mean: this machine's GPU is often shared."""
+    import cupy as cp
+
+    fn()
+    cp.cuda.runtime.deviceSynchronize()
+    best = None
+    for _ in range(reps):
+        t0 = time.perf_counter()
+        fn()
+        cp.cuda.runtime.deviceSynchronize()
+        dt = time.perf_counter() - t0
+        best = dt if best is None else min(best, dt)
+    return best
+
+
+def _trip_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
+             n0, nfreq):
+    """The PCIe A/B: whole state both ways vs the measured input set.
+
+    The transfer columns are timed WITHOUT the kernel, because that is the
+    only part this comparison changes and because the kernel dominates the
+    round trip whenever another process is using the card:
+
+    * UP / DOWN   ``stage_luffy`` and ``fetch_luffy``, whole state --
+                  55,652 bytes a thread each way.
+    * ARENA UP/DOWN  ``LuffyArena.upload`` and ``.results()`` -- 3,228 bytes
+                  up and 1,700 back, into buffers that already exist, so the
+                  ~1.8 GB of scratch allocation and memset and the shared
+                  tables are not paid per batch.
+    * TRIP        the two ends plus the launch, ``launch_luffy`` against
+                  ``LuffyArena.run``.
+
+    Both return the SAME numbers; ``tests/stage_c/test_input_set.py`` is what
+    says so.
+    """
+    import cupy as cp
+
+    from voacap_gpu.stage_c.driver import (RESULT_BYTES_PER_THREAD,
+                                           STATE_BYTES_PER_THREAD,
+                                           UPLOAD_BYTES_PER_THREAD,
+                                           LuffyArena, fetch_luffy,
+                                           launch_luffy, stage_luffy)
+
+    print(f"{'circ-hours':>11} {'kernel':>8} | {'up':>7} {'down':>7} "
+          f"{'xfer':>7} | {'a-up':>7} {'a-down':>7} {'a-xfer':>7} "
+          f"| {'xfer x':>7} | {'trip':>8} {'a-trip':>8} {'trip x':>7}")
+    print("-" * 104)
+    for n in args.sizes:
+        reps = max(2, n0 * args.reps // max(n, 1)) if n > 20000 else args.reps
+        idx = np.arange(n) % n0
+        bufs, rays = base[idx], base_rays[idx]
+        ipf, ii, ai = base_ipf[idx], base_ii[idx], base_ai[idx]
+        try:
+            up = _best(lambda: stage_luffy(bufs, rays, ipf, iono, ii, ant, ai,
+                                           block=args.block), reps)
+            run, state = stage_luffy(bufs, rays, ipf, iono, ii, ant, ai,
+                                     block=args.block)
+            kern = _best(run, reps)
+            down = _best(lambda: fetch_luffy(state), reps)
+            del run, state
+            cp.get_default_memory_pool().free_all_blocks()
+            trip = _best(lambda: launch_luffy(bufs, rays, ipf, iono, ii, ant,
+                                              ai, block=args.block), reps)
+            cp.get_default_memory_pool().free_all_blocks()
+            arena = LuffyArena(n, iono, ant, block=args.block)
+            aup = _best(lambda: arena.upload(bufs, rays, ipf, ii, ai), reps)
+            arena.launch()
+            adown = _best(arena.results, reps)
+            atrip = _best(lambda: arena.run(bufs, rays, ipf, ii, ai), reps)
+            del arena
+            cp.get_default_memory_pool().free_all_blocks()
+        except Exception as exc:
+            print(f"{n:>11,}  failed: {type(exc).__name__}: {exc}")
+            continue
+        x, ax = up + down, aup + adown
+        print(f"{n:>11,} {kern * 1e3:>8.1f} | {up * 1e3:>7.1f} "
+              f"{down * 1e3:>7.1f} {x * 1e3:>7.1f} | {aup * 1e3:>7.1f} "
+              f"{adown * 1e3:>7.1f} {ax * 1e3:>7.1f} | {x / ax:>6.2f}x "
+              f"| {trip * 1e3:>8.1f} {atrip * 1e3:>8.1f} "
+              f"{trip / atrip:>6.2f}x")
+    print(f"\nper circuit-hour: {STATE_BYTES_PER_THREAD:,} B of state, of "
+          f"which {UPLOAD_BYTES_PER_THREAD:,} B is INPUT and "
+          f"{RESULT_BYTES_PER_THREAD:,} B is RESULT.  Times are the MIN over "
+          f"{args.reps} reps, in ms.")
+    print("At small N the arena wins nothing: the transfer is a few tens of "
+          "MB and what is left is launch latency and the shared tables, "
+          "which neither column can avoid.")
+
+
 def _warp_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
              n0, nfreq):
     """The A/B: thread-per-circuit-hour vs warp-per-circuit-hour, kernel-only.
@@ -235,12 +350,17 @@ def main():
     ap.add_argument("--warp", action="store_true",
                     help="A/B the warp-per-circuit-hour kernel against the "
                          "thread-per-circuit-hour one, kernel-only")
+    ap.add_argument("--trip", action="store_true",
+                    help="A/B the ROUND TRIP: whole state both ways vs the "
+                         "measured input set, with and without an arena")
     ap.add_argument("--wpb", type=int, default=4,
                     help="warps per block for the warp kernel")
     args = ap.parse_args()
 
     from voacap_gpu.stage_c.driver import (CIRCUIT_DTYPE,
+                                           RESULT_BYTES_PER_THREAD,
                                            STATE_BYTES_PER_THREAD,
+                                           UPLOAD_BYTES_PER_THREAD,
                                            circuit_state_sizeof,
                                            shared_antenna_tables,
                                            shared_iono_tables)
@@ -268,6 +388,17 @@ def main():
     nfreq = float((frel[:, 1:13] > 0.0).sum(axis=1).mean())
     print(f"live frequency slots per circuit-hour: {nfreq:.1f} "
           f"(the Fortran baseline circuit runs 28)\n")
+
+    print(f"of that state, {UPLOAD_BYTES_PER_THREAD:,} B is INPUT and "
+          f"{RESULT_BYTES_PER_THREAD:,} B is RESULT — "
+          f"{STATE_BYTES_PER_THREAD / UPLOAD_BYTES_PER_THREAD:.1f}x and "
+          f"{STATE_BYTES_PER_THREAD / RESULT_BYTES_PER_THREAD:.1f}x less "
+          "than the whole thing\n")
+
+    if args.trip:
+        _trip_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
+                 n0, nfreq)
+        return
 
     if args.warp:
         _warp_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
