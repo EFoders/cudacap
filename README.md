@@ -6,7 +6,7 @@ This project was done in support of Prop-SL, an HF, LF and VLF propagation platf
 
 The point-to-point prediction engine is ported end to end and runs on the GPU. On an RTX 5080 it computes a
 world-scale batch **~15× faster than the original Fortran across all 32 cores**
-of this machine (and bit-exact against a single-core run when fast-math is
+of my machine (and bit-exact against a single-core run when fast-math is
 off). See the two architecture documents:
 
 - **[docs/architecture_fortran.md](docs/architecture_fortran.md)** — how the
@@ -65,7 +65,7 @@ what is validated vs refused).
 
 ## Performance
 
-Measured on this machine (RTX 5080 GPU, 32-core CPU for the Fortran), a
+Measured on my machine (RTX 5080 GPU, 32-core CPU for the Fortran), a
 161,280-circuit-hour workload, whole wall-clock including host prep and PCIe:
 
 | | total | vs Fortran 32-core |
