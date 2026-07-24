@@ -79,9 +79,15 @@ from voacap_gpu.scalar.virtim import virtim
 # module docstring on why this, and not the file's 79.5, is the default.
 POLE_DEFAULT = (78.5, -69.0)
 
-# Vendored CCIR/URSI coefficient directory (the one the tier-B dumps used).
-_COEFFS_DIR = (pathlib.Path(__file__).resolve().parents[2] / "reference"
-               / "voacapl" / "voacapl" / "itshfbc" / "coeffs")
+# CCIR/URSI coefficient directory.  Ships INSIDE the package (data/coeffs),
+# so voacap_gpu is self-contained: predict() reads coeffNN.asc + fof2*.asc
+# from here at runtime.  Falls back to the vendored oracle tree when running
+# from a source checkout without the bundled copy (e.g. mid-rebuild), and can
+# be overridden per call via ``build_circuit(..., iono=redmap(dir, ...))``.
+_PKG_COEFFS = pathlib.Path(__file__).resolve().parent / "data" / "coeffs"
+_VENDORED_COEFFS = (pathlib.Path(__file__).resolve().parents[2] / "reference"
+                    / "voacapl" / "voacapl" / "itshfbc" / "coeffs")
+_COEFFS_DIR = _PKG_COEFFS if _PKG_COEFFS.is_dir() else _VENDORED_COEFFS
 
 _GCDLNG = F32(10000.0)          # blkdat long-path threshold, km
 

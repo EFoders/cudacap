@@ -35,3 +35,14 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Non-.py runtime assets that MUST ship in the wheel, or an installed
+# voacap_gpu cannot run: the NVRTC CUDA kernels compiled at runtime, and the
+# CCIR/URSI coefficient data predict() reads to build the ionosphere.
+[tool.setuptools.package-data]
+voacap_gpu = [
+    "cuda/kernels/*.cuh",
+    "cuda/*.md",
+    "data/coeffs/*.asc",
+    "data/coeffs/*.md",
+]
