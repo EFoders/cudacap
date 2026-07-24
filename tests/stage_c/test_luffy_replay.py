@@ -39,6 +39,7 @@ from voacap_gpu.stage_a.circuit import Circuit
 from voacap_gpu.stage_a.f32math import F32
 from voacap_gpu.stage_a.luffy import luffy
 from voacap_gpu.stage_a.redmap import redmap
+from voacap_gpu.stage_c.state import RAYS_DTYPE
 from voacap_gpu.stage_c.driver import (CIRCUIT_DTYPE, circuit_state_sizeof,
                                        launch_luffy, pack_circuit,
                                        shared_antenna_tables,
@@ -54,7 +55,13 @@ NHOUR = 24
 
 
 def _deck_cases(deck):
-    """One deck -> its 24 (entry buffer, expected exit buffer, ipflag) rows.
+    """One deck -> its 24 (entry, expected exit, ipflag) rows.
+
+    ``pack_circuit`` returns a PAIR -- the CircuitState buffer and the /RAYS/
+    buffer -- because /RAYS/ travels to the device structure-of-arrays rather
+    than inside CircuitState (see ``stage_c/driver.py``).  Both halves are
+    carried, and both are compared: the two together are still the whole
+    Stage A ``Circuit``, cell for cell.
 
     The Circuit is built once and reused, exactly as Stage A's replay does, so
     the COMMON persistence between hours is reproduced; the snapshot taken
@@ -78,9 +85,10 @@ def _deck_cases(deck):
     for vin in ins:
         _apply(c, vin)
         ipflag = int(vin["ipflag"])
-        entry = pack_circuit(c)
+        entry, entry_rays = pack_circuit(c)
         luffy(c, ipflag)                 # Stage A raising here is a hard fail
-        rows.append((entry, pack_circuit(c), ipflag,
+        exit_, exit_rays = pack_circuit(c)
+        rows.append((entry, entry_rays, exit_, exit_rays, ipflag,
                      int(vin["mspec"]), float(vin["gcdkm"])))
     return iono, c.cant, rows
 
@@ -93,6 +101,7 @@ def _replay():
     if "v" in _CACHE:
         return _CACHE["v"]
     ionos, cants, entries, exits = [], [], [], []
+    entries_rays, exits_rays = [], []
     iono_idx, ant_idx, ipflags, tags, deckof = [], [], [], [], []
     for deck in DECKS:
         got = _deck_cases(deck)
@@ -102,9 +111,11 @@ def _replay():
         ionos.append(iono)
         cants.append(cant)
         ii, ai = len(ionos) - 1, len(cants) - 1
-        for entry, exit_, ipflag, mspec, gcdkm in rows:
+        for entry, entry_rays, exit_, exit_rays, ipflag, mspec, gcdkm in rows:
             entries.append(entry)
+            entries_rays.append(entry_rays)
             exits.append(exit_)
+            exits_rays.append(exit_rays)
             ipflags.append(ipflag)
             iono_idx.append(ii)
             ant_idx.append(ai)
@@ -119,6 +130,8 @@ def _replay():
                 tags.append("SHORT")
     v = dict(ionos=ionos, cants=cants,
              entries=np.stack(entries), exits=np.stack(exits),
+             entries_rays=np.stack(entries_rays),
+             exits_rays=np.stack(exits_rays),
              ipflags=np.array(ipflags, np.int32),
              iono_idx=np.array(iono_idx, np.int32),
              ant_idx=np.array(ant_idx, np.int32),
@@ -160,8 +173,9 @@ def test_luffy_kernel_bit_exact_vs_stage_a():
     n = v["entries"].shape[0]
     assert n == len(DECKS) * NHOUR, f"{n} circuit-hours, expected 24 per deck"
 
-    got, status = launch_luffy(
-        v["entries"], v["ipflags"], shared_iono_tables(v["ionos"]),
+    got, got_rays, status = launch_luffy(
+        v["entries"], v["entries_rays"], v["ipflags"],
+        shared_iono_tables(v["ionos"]),
         v["iono_idx"], shared_antenna_tables(v["cants"]), v["ant_idx"])
 
     bad = np.flatnonzero(status != 0)
@@ -170,23 +184,28 @@ def test_luffy_kernel_bit_exact_vs_stage_a():
         + ", ".join(f"{v['decks'][i]} row {i % NHOUR} status {status[i]}"
                     for i in bad[:10]))
 
-    exp = v["exits"]
+    # CircuitState and the separate SoA /RAYS/ buffer -- together the whole
+    # Stage A Circuit, so both are walked field by field.
+    checks = [(CIRCUIT_DTYPE, got, v["exits"], ""),
+              (RAYS_DTYPE, got_rays, v["exits_rays"], "rays.")]
     # per-struct and overall exact fractions, reported before the assert so a
     # failure says WHERE it starts rather than only that it happened
     per_struct = {}
     failures = []
-    for label, path in _fields(CIRCUIT_DTYPE):
-        g = np.asarray(_get(got, path))
-        e = np.asarray(_get(exp, path))
-        if g.dtype.kind == "f":
-            same = g.view(np.uint32) == e.view(np.uint32)
-        else:
-            same = g == e
-        block = label.split(".")[0]
-        hit, tot = per_struct.get(block, (0, 0))
-        per_struct[block] = (hit + int(same.sum()), tot + int(same.size))
-        if not same.all():
-            failures.append((label, int((~same).sum()), int(same.size)))
+    for dt, g_all, e_all, prefix in checks:
+        for label, path in _fields(dt):
+            label = prefix + label
+            g = np.asarray(_get(g_all, path))
+            e = np.asarray(_get(e_all, path))
+            if g.dtype.kind == "f":
+                same = g.view(np.uint32) == e.view(np.uint32)
+            else:
+                same = g == e
+            block = label.split(".")[0]
+            hit, tot = per_struct.get(block, (0, 0))
+            per_struct[block] = (hit + int(same.sum()), tot + int(same.size))
+            if not same.all():
+                failures.append((label, int((~same).sum()), int(same.size)))
     hits = sum(h for h, _ in per_struct.values())
     tots = sum(t for _, t in per_struct.values())
     print(f"\nStage C LUFFY vs Stage A: {n} circuit-hours, "
@@ -201,9 +220,10 @@ def test_luffy_kernel_bit_exact_vs_stage_a():
 
     # and the unforgiving per-field form, for the identical report shape the
     # rest of Stage C uses
-    for label, path in _fields(CIRCUIT_DTYPE):
-        assert_bitexact(np.asarray(_get(got, path)),
-                        np.asarray(_get(exp, path)), label)
+    for dt, g_all, e_all, prefix in checks:
+        for label, path in _fields(dt):
+            assert_bitexact(np.asarray(_get(g_all, path)),
+                            np.asarray(_get(e_all, path)), prefix + label)
 
 
 @pytest.mark.skipif(not DECKS, reason="oracle dump missing")

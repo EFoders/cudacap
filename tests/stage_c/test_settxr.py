@@ -61,7 +61,10 @@ extern "C" __global__ void drive(const LayerState* st, const MufState* muf,
     if (i >= n) return;
     int na = numants + 1;
     status[i] = settxr(&st[i], &muf[i], &sigd[i], &reflx[i], &losx[i],
-                       &rays[i], array, aeff, iats, xfqs_all + i * na,
+                       // rays_view_of(): the stride-1 view, byte-for-byte the
+                       // packed struct this test has always built.
+                       rays_view_of(&rays[i]),
+                       array, aeff, iats, xfqs_all + i * na,
                        xfqe_all + i * na, offazim, numants, &allm[i],
                        &itxrcp[i * 3], freq[i], gcdkm[i], amind[i]);
 }

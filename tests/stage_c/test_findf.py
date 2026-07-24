@@ -47,7 +47,9 @@ extern "C" __global__ void drive(const LayerState* ls, ReflxState* rx,
                                  const float* amind, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    findf(&ls[i], &rx[i], &ry[i], 1, freq[i], amind[i]);
+    // rays_view_of() is the stride-1 view: byte-for-byte the packed struct
+    // this test has always built, which is what proves the SoA refactor inert.
+    findf(&ls[i], &rx[i], rays_view_of(&ry[i]), 1, freq[i], amind[i]);
 }
 '''
 

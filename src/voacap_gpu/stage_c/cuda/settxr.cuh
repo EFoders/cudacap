@@ -53,6 +53,7 @@
 #include "f32math.cuh"
 #include "gain.cuh"
 #include "prbmuf.cuh"
+#include "raysview.cuh"
 #include "state.cuh"
 
 #define VOACAP_SETTXR_NRAY 45
@@ -62,13 +63,13 @@
 // state: LayerState (GYZ/ABIY/FI/FS/HS/KM/SIGPAT/EPSPAT); muf: MufState;
 // sigd: SigdState (HTLOSS/XNUZ/HNU/AFE/BFE/XVE); reflx: ReflxState (read, and
 // ray 1 OVERWRITTEN by the over-the-MUF fallback); losx: LosxState (output);
-// rays: RaysState (IFOB, for the Es dead frequency); allm: AllModeState
+// rays: RaysView over /RAYS/ (IFOB, for the Es dead frequency); allm: AllModeState
 // (PROB(1) and PROB(2) written); itxrcp: the 1-based (3,) control-area
 // indices; freq in MHz; gcdkm in km; amind the minimum take-off angle in
 // degrees.  Returns the status documented above.
 __device__ inline int settxr(const LayerState* state, const MufState* muf,
                              const SigdState* sigd, ReflxState* reflx,
-                             LosxState* losx, const RaysState* rays,
+                             LosxState* losx, const RaysView& rays,
                              const float* cant_array, const float* cant_aeff,
                              const int* cant_iats, const float* cant_xfqs,
                              const float* cant_xfqe,
@@ -152,7 +153,7 @@ __device__ inline int settxr(const LayerState* state, const MufState* muf,
                 if (state->fs[2 * 6 + k] > 0.0f) {
                     // IFOB is the reflectrix in kHz; slot (1,3) is the Es
                     // "dead" frequency below which the layer blanks the mode
-                    float fsdead = (float)rays->ifob[(1 * 31 + 3) * 6 + k];
+                    float fsdead = (float)rv_ifob(rays, 1, 3, k);
                     fsdead = div32(fsdead, 1000.0f);
                     float fmhz = pymax(freq, fsdead);
                     float sins = VC_RZ * cdel / (VC_RZ + state->hs[k]);

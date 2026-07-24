@@ -64,7 +64,10 @@ extern "C" __global__ void drive(const LayerState* st, const MufState* muf,
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     int na = numants + 1;
-    status[i] = esmod(&st[i], &muf[i], &sigd[i], &anois[i], &rays[i],
+    // rays_view_of() is the stride-1 view: byte-for-byte the packed struct
+    // this test has always built, which is what proves the SoA refactor inert.
+    status[i] = esmod(&st[i], &muf[i], &sigd[i], &anois[i],
+                      rays_view_of(&rays[i]),
                       array, aeff, iats, xfqs_all + i * na, xfqe_all + i * na,
                       offazim, pwrdba_all + i * na, numants, &zon[i],
                       freq[i], jmode[i], gcd[i], gcdkm[i], amind[i]);

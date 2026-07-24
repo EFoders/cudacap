@@ -90,6 +90,7 @@
 #include "lngpat.cuh"
 #include "lsmooth.cuh"
 #include "mpath.cuh"
+#include "raysview.cuh"
 #include "relbil.cuh"
 #include "selmod.cuh"
 #include "seltxr.cuh"
@@ -130,7 +131,8 @@ __device__ inline int luffy_genois_(CircuitState* c, const CircuitTables* t,
 // different local times and often different hemispheres.  That is the whole
 // reason the long-path model exists.
 // ---------------------------------------------------------------------------
-__device__ inline void luffy_select_area_(CircuitState* c, int ipfg,
+__device__ inline void luffy_select_area_(CircuitState* c,
+                                          const RaysView& rays, int ipfg,
                                           int* k_out, int* xmdl_out) {
     int k;
     int xmdl;
@@ -157,7 +159,7 @@ __device__ inline void luffy_select_area_(CircuitState* c, int ipfg,
             // .....DEVIATION LOSS FACTOR
             lecden(&c->layers, k);
             genion(&c->layers, k);
-            fobby(&c->layers, &c->rays, k);
+            fobby(&c->layers, rays, k);
             alosfv(&c->layers, &c->muf, k);
             if (ipfg == 100 || k > 1) {
                 *k_out = k; *xmdl_out = xmdl; return;
@@ -196,12 +198,13 @@ __device__ inline int luffy_min_hops_(const int* nhopmf) {
 // (label 122's ``go to 265``), which skips RELBIL and everything after it.
 // ---------------------------------------------------------------------------
 __device__ inline int luffy_short_path_(CircuitState* c,
-                                        const CircuitTables* t, float freq,
+                                        const CircuitTables* t,
+                                        const RaysView& rays, float freq,
                                         int k, int ihmin, int ipfg,
                                         int* skip) {
     *skip = 0;
     // .....RAY SET TABLE
-    findf(&c->layers, &c->reflx, &c->rays, k, freq, c->amind);
+    findf(&c->layers, &c->reflx, rays, k, freq, c->amind);
     int ihsrt, ihstp;
     if (c->reflx.dmaxkm[k] <= 0.0f) {
         if (ipfg == 300) {
@@ -236,7 +239,7 @@ __device__ inline int luffy_short_path_(CircuitState* c,
         (void)fdist(&c->reflx, &c->modes, k, freq, c->amind);
         int nummod = 0;
         int st = inmuf(&c->layers, &c->modes, &c->muf, &c->sigd, &c->anois,
-                   &c->rays, t->array, t->aeff, t->iats, t->xfqs, t->xfqe,
+                   rays, t->array, t->aeff, t->iats, t->xfqs, t->xfqe,
                    t->offazim, t->pwrdba, t->numants, &c->zon, freq,
                    c->frq.jmode, c->gcd, ihop, &nummod);
         if (st) return st;
@@ -247,7 +250,7 @@ __device__ inline int luffy_short_path_(CircuitState* c,
     }
 
     // .....UP TO 2 ES MODES, THEN THE (DEAD) ES-F MODE
-    int st = esmod(&c->layers, &c->muf, &c->sigd, &c->anois, &c->rays,
+    int st = esmod(&c->layers, &c->muf, &c->sigd, &c->anois, rays,
                    t->array, t->aeff, t->iats, t->xfqs, t->xfqe, t->offazim,
                    t->pwrdba, t->numants, &c->zon, freq, c->frq.jmode, c->gcd,
                    c->gcdkm, c->amind);
@@ -261,13 +264,14 @@ __device__ inline int luffy_short_path_(CircuitState* c,
 // The two-ended model: price every ray at each end, pick one, join them.
 // ---------------------------------------------------------------------------
 __device__ inline int luffy_long_path_(CircuitState* c,
-                                       const CircuitTables* t, float freq) {
+                                       const CircuitTables* t,
+                                       const RaysView& rays, float freq) {
     // .....AREA COVERAGE, TRANSMITTER END, THEN RECEIVER END
-    findf(&c->layers, &c->reflx, &c->rays, c->frq.itxrcp[1], freq, c->amind);
-    findf(&c->layers, &c->reflx, &c->rays, c->frq.itxrcp[2], freq, c->amind);
+    findf(&c->layers, &c->reflx, rays, c->frq.itxrcp[1], freq, c->amind);
+    findf(&c->layers, &c->reflx, rays, c->frq.itxrcp[2], freq, c->amind);
     // .....GAIN MINUS LOSS (which runs SETTXR)
     int st = gmloss(&c->layers, &c->muf, &c->sigd, &c->reflx, &c->losx,
-                    &c->rays, t->array, t->aeff, t->iats, t->xfqs, t->xfqe,
+                    rays, t->array, t->aeff, t->iats, t->xfqs, t->xfqe,
                     t->offazim, t->numants, &c->allm, &c->zon, &c->lpath,
                     c->frq.itxrcp, freq, c->gcdkm, c->amind);
     if (st) return st;
@@ -286,6 +290,7 @@ __device__ inline int luffy_long_path_(CircuitState* c,
 // found (label 165).
 // ---------------------------------------------------------------------------
 __device__ inline int luffy_frequency_(CircuitState* c, const CircuitTables* t,
+                                       const RaysView& rays,
                                        int ifx, int ipflag, int k, int ihmin,
                                        float pluf, SmoothStore* store,
                                        int* found) {
@@ -315,11 +320,11 @@ __device__ inline int luffy_frequency_(CircuitState* c, const CircuitTables* t,
     if (st) return st;
 
     if (!(ipfg == 100 || ipfg == 300)) {
-        st = luffy_long_path_(c, t, freq);
+        st = luffy_long_path_(c, t, rays, freq);
         if (st) return st;
     } else {
         int skip = 0;
-        st = luffy_short_path_(c, t, freq, k, ihmin, ipfg, &skip);
+        st = luffy_short_path_(c, t, rays, freq, k, ihmin, ipfg, &skip);
         if (st) return st;
         if (skip)
             return 0;                   // label 122 -> 265, next frequency
@@ -432,7 +437,7 @@ __device__ inline int luffy_after_loop_(CircuitState* c,
 // The body: Stage A's _luffy.
 // ---------------------------------------------------------------------------
 __device__ inline int luffy_body_(CircuitState* c, const CircuitTables* t,
-                                  int ipflag) {
+                                  const RaysView& rays, int ipflag) {
     int ipfg = ipflag;
     // LUFFY's "TEMPORARY STORAGE" -- only the smoothing recycle reads it, and
     // it has to outlive the first pass, so it is made once per hour here.
@@ -461,9 +466,9 @@ __device__ inline int luffy_body_(CircuitState* c, const CircuitTables* t,
     // SELMOD and ANOIS1 are above the label and run once for both models.
     while (true) {
         int k, xmdl;
-        luffy_select_area_(c, ipfg, &k, &xmdl);      // labels 83, 84, 85
+        luffy_select_area_(c, rays, ipfg, &k, &xmdl);  // labels 83, 84, 85
         // .....CAN RUN FOR SHORT PATHS ALSO, SO SET ALL SAMPLE AREAS
-        setlng(&c->layers, &c->rays);
+        setlng(&c->layers, rays);
         // .....SET ABSORPTION LOSS PARAMETERS, ADJUST SIGNAL DISTRIBUTION
         // .....TABLES
         sigdis(&c->layers, &c->muf, t->sys, t->perr, t->f2d111, &c->sigd,
@@ -479,7 +484,7 @@ __device__ inline int luffy_body_(CircuitState* c, const CircuitTables* t,
 
         for (int ifx = 1; ifx <= VC_LUFFY_NFREQ; ++ifx) {   // DO 265 IFX=1,12
             int found = 0;
-            int st = luffy_frequency_(c, t, ifx, ipflag, k, ihmin, pluf,
+            int st = luffy_frequency_(c, t, rays, ifx, ipflag, k, ihmin, pluf,
                                       &store, &found);
             if (st) return st;
             if (found) {
@@ -508,11 +513,18 @@ __device__ inline int luffy_body_(CircuitState* c, const CircuitTables* t,
 // itself.  numants is the /cantenna/ extent shared by the whole launch
 // (padding entries carry IATS 0, which GAIN's DO-10 scan never matches).
 //
+// COMMON /RAYS/ does NOT ride inside CircuitState: it is 30,672 of the 55,652
+// bytes and its warp-strided reads dominated the kernel's memory cost, so it
+// arrives as three STRUCTURE-OF-ARRAYS buffers laid out for `rays_n` threads,
+// this one at lane `rays_t`.  Everything else about it is unchanged.
+//
 // ipflag: 100 short-path system performance, 200 long-path, 300 short-path
 // LUF, 400 long-path LUF.  /SON/ is the result -- one column per frequency --
 // plus /MUFS/ XLUF and /FRQ/ FREA(13) on the LUF arm.
 // ---------------------------------------------------------------------------
 __device__ inline int luffy(CircuitState* c,
+                            int* rays_nang, float* rays_ang, int* rays_ifob,
+                            int rays_n, int rays_t,
                             const float* fam, const float* dud,
                             const float* fakp, const float* fakmap,
                             const float* hmym, const float* fakabp,
@@ -544,8 +556,11 @@ __device__ inline int luffy(CircuitState* c,
     t.pwrdba  = ant_pwrdba  + (long)ant_idx * na;
     t.numants = numants;
 
+    RaysView rays = rays_view_soa(rays_nang, rays_ang, rays_ifob,
+                                  rays_n, rays_t);
+
     int mspec_temp = c->mspec;              // restored at label 999
-    int st = luffy_body_(c, &t, ipflag);
+    int st = luffy_body_(c, &t, rays, ipflag);
     c->mspec = mspec_temp;                  // Stage A's try/finally
     return st;
 }

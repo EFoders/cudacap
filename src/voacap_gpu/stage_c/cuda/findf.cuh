@@ -23,14 +23,16 @@
 #include "constants.cuh"
 #include "f32math.cuh"
 #include "penang.cuh"
+#include "raysview.cuh"
 #include "state.cuh"
 
 // state: LayerState (ionogram); reflx: ReflxState (out, needs DELPEN from
-// PENANG which FINDF calls); rays: RaysState (ANG/IFOB/NANG, IFOB from
-// FOBBY, NANG from SANG); k: area; freq: MHz; amind: min take-off angle
-// (deg).  _ITYPE(IL) == IL, so layer indices are stored directly.
+// PENANG which FINDF calls); rays: RaysView over /RAYS/ (ANG/IFOB/NANG, IFOB
+// from FOBBY, NANG from SANG), read only; k: area; freq: MHz; amind: min
+// take-off angle (deg).  _ITYPE(IL) == IL, so layer indices are stored
+// directly.
 __device__ inline void findf(const LayerState* state, ReflxState* reflx,
-                             const RaysState* rays, int k, float freq,
+                             const RaysView& rays, int k, float freq,
                              float amind) {
     float* delfx = reflx->delfx;
     float* hpflx = reflx->hpflx;
@@ -45,9 +47,7 @@ __device__ inline void findf(const LayerState* state, ReflxState* reflx,
     const float* fvert = state->fvert;
     const float* afac = state->afac;
     const float* fi = state->fi;
-    const float* ang = rays->ang;
-    const int* ifob = rays->ifob;
-    int nang = rays->nang;
+    int nang = rv_nang(rays);
 
     int jfhz = (int)(1000.0f * freq);
     reflx->dmaxkm[k] = 0.0f;
@@ -112,22 +112,22 @@ L295:                                   // INCREMENT ANGLE
     if (ia - nang <= 0) goto L300;
     goto L400;
 L300:
-    if (delpen[il * 6 + k] - ang[ia] <= 0.0f) goto L345;
+    if (delpen[il * 6 + k] - rv_ang(rays, ia) <= 0.0f) goto L345;
     goto L305;
 L305:                                   // SEARCH FOR FREQUENCY
     if (++guard > 200000) goto L400;
-    if (ifob[(ia * 31 + ilow) * 6 + k] - jfhz < 0) goto L306;
+    if (rv_ifob(rays, ia, ilow, k) - jfhz < 0) goto L306;
     goto L325;
 L306:
     if (ih - ihigh < 0) goto L315;
     goto L275;
 L315:
-    d = ifob[(ia * 31 + ih) * 6 + k] - jfhz;
+    d = rv_ifob(rays, ia, ih, k) - jfhz;
     if (d < 0) goto L335;
     if (d == 0) goto L325;
     goto L330;
 L325:                                   // EXACT FREQUENCY
-    delfx[iaf * 4 + k] = ang[ia];
+    delfx[iaf * 4 + k] = rv_ang(rays, ia);
     htflx[iaf * 4 + k] = htrue[ih * 6 + k];
     afflx[iaf * 4 + k] = afac[ih * 6 + k];
     fv = fvert[ih * 6 + k];
@@ -138,18 +138,18 @@ L330:                                   // INCREMENT HEIGHT INDEX
     ih = ih + 1;
     goto L305;
 L335:
-    if (ifob[(ia * 31 + ih + 1) * 6 + k] - jfhz < 0) goto L330;
+    if (rv_ifob(rays, ia, ih + 1, k) - jfhz < 0) goto L330;
     goto L340;
 L340: {                                 // INTERPOLATION
-    float slopd = (float)(ifob[(ia * 31 + ih + 1) * 6 + k]
-                          - ifob[(ia * 31 + ih) * 6 + k]);
+    float slopd = (float)(rv_ifob(rays, ia, ih + 1, k)
+                          - rv_ifob(rays, ia, ih, k));
     slopd = pymax(1.0f, slopd);
-    float slope = (float)(jfhz - ifob[(ia * 31 + ih) * 6 + k]) / slopd;
+    float slope = (float)(jfhz - rv_ifob(rays, ia, ih, k)) / slopd;
     htflx[iaf * 4 + k] = htrue[ih * 6 + k]
         + slope * (htrue[(ih + 1) * 6 + k] - htrue[ih * 6 + k]);
     fv = fvert[ih * 6 + k]
         + slope * (fvert[(ih + 1) * 6 + k] - fvert[ih * 6 + k]);
-    delfx[iaf * 4 + k] = ang[ia];
+    delfx[iaf * 4 + k] = rv_ang(rays, ia);
     hp = hprim[ih * 6 + k]
         + slope * (hprim[(ih + 1) * 6 + k] - hprim[ih * 6 + k]);
     afflx[iaf * 4 + k] = afac[ih * 6 + k]

@@ -47,6 +47,7 @@
 #include "gain.cuh"
 #include "prbmuf.cuh"
 #include "pwrdb.cuh"
+#include "raysview.cuh"
 #include "state.cuh"
 
 // x**n with an INTEGER exponent — gfortran calls powi, which is binary
@@ -95,13 +96,14 @@ __device__ inline void esmod_preset_(ZonState* zon) {
 
 // Fill /ZON/ slots 4 and 5 with the sporadic-E modes.  state: LayerState
 // (/RON/, /ES/, /GEOG/); muf: MufState; sigd: SigdState; anois: AnoisState
-// (RCNSE only); rays: RaysState (IFOB only); zon: ZonState, the output.
+// (RCNSE only); rays: RaysView over /RAYS/ (IFOB only); zon: ZonState, the
+// output.
 // freq: MHz; jmode: the ionosphere SELMOD picked; gcd/gcdkm: great-circle
 // distance in radians and km (/DON/); amind: the minimum usable take-off
 // angle in degrees (/DON/).  Returns the status documented above.
 __device__ inline int esmod(const LayerState* state, const MufState* muf,
                             const SigdState* sigd, const AnoisState* anois,
-                            const RaysState* rays, const float* cant_array,
+                            const RaysView& rays, const float* cant_array,
                             const float* cant_aeff, const int* cant_iats,
                             const float* cant_xfqs, const float* cant_xfqe,
                             const float* cant_offazim,
@@ -120,7 +122,7 @@ __device__ inline int esmod(const LayerState* state, const MufState* muf,
     }
 
     // The maps are Es or E, so they are not usable at the low end.
-    float fsdead = (float)rays->ifob[(1 * 31 + 3) * 6 + jmode];
+    float fsdead = (float)rv_ifob(rays, 1, 3, jmode);
     fsdead = div32(fsdead, 1000.0f);
     fsdead = pymin(fsdead, 3.0f);
 

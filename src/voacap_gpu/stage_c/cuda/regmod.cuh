@@ -50,16 +50,17 @@
 #include "gain.cuh"
 #include "prbmuf.cuh"
 #include "pwrdb.cuh"
+#include "raysview.cuh"
 #include "state.cuh"
 
 // state: LayerState (/RON/, /ES/, /GEOG/); modes: ModesState (/MODES/);
 // muf: MufState (/MUFS/); sigd: SigdState (/SIGD/); anois: AnoisState
-// (/ANOIS/); rays: RaysState (/RAYS/); zon: ZonState, the output.
+// (/ANOIS/); rays: RaysView over /RAYS/ (IFOB only); zon: ZonState, the output.
 // freq: MHz; jmode: the ionosphere SELMOD picked; gcd: great-circle distance
 // in radians (/DON/).  Returns the status documented above.
 __device__ inline int regmod(const LayerState* state, const ModesState* modes,
                              const MufState* muf, const SigdState* sigd,
-                             const AnoisState* anois, const RaysState* rays,
+                             const AnoisState* anois, const RaysView& rays,
                              const float* cant_array, const float* cant_aeff,
                              const int* cant_iats, const float* cant_xfqs,
                              const float* cant_xfqe, const float* cant_offazim,
@@ -115,7 +116,7 @@ __device__ inline int regmod(const LayerState* state, const ModesState* modes,
                 // Es obscuration.  At low frequencies folding regular E into
                 // sporadic E misbehaves, so the sounding floor FSDEAD applies
                 // (SIGDIS does the same).
-                float fsdead = (float)rays->ifob[(1 * 31 + 3) * 6 + k];
+                float fsdead = (float)rv_ifob(rays, 1, 3, k);
                 fsdead = div32(fsdead, 1000.0f);
                 fsdead = pymin(fsdead, 3.0f);
                 float fmhz = pymax(freq, fsdead);

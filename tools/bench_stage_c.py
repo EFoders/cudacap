@@ -11,13 +11,18 @@ to fill a batch.  Every thread runs a complete LUFFY call -- frequency sweep,
 hop loop, both path models, the blend -- so this is end-to-end throughput,
 not a microbenchmark of one routine.
 
-Two costs are reported separately because they scale differently:
+TWO COLUMNS, AND THE DIFFERENCE BETWEEN THEM IS THE HEADLINE:
 
-* KERNEL is the compute.
-* PACK/UNPACK is the 55,652 bytes of per-thread state crossing PCIe.  That is
-  a harness cost here, not an intrinsic one: a production driver builds the
-  state on-device from card inputs and never ships it.  Reported so the
-  kernel number cannot be mistaken for a whole-pipeline number.
+* KERNEL is the compute, timed with the batch already resident.
+* TRIP is the same launch plus the 55,652 bytes of per-thread state crossing
+  PCIe in both directions.  That is a harness cost, not an intrinsic one: a
+  production driver builds the state on-device from card inputs and never
+  ships it.
+
+Earlier revisions of this file timed only the round trip and called it
+"kernel", which understated Stage C by a factor of five.  At 32,256 threads
+the round trip is ~600 ms of which the KERNEL is ~125 ms; the other 475 ms is
+1.8 GB up and 1.8 GB back at PCIe speed.
 
 THE UNIT MATTERS.  The Fortran baseline is 17.5 ms per circuit measured on
 this machine (tools/bench_scenario.py), and that circuit is 24 hours x 28
@@ -26,10 +31,12 @@ per-circuit-hour would flatter Stage C by 2.8x.  Everything below is
 normalised to one (circuit, hour, frequency) -- 26.0 us for the Fortran on
 one core -- which is the unit that compares like for like.
 
-MEASURED RESULT: 1.77-1.9 us per evaluation, saturating from ~32k threads
-on.  That is **13.7x one Fortran core** -- and a 32-core box running the
-original Fortran is still roughly 2x faster than this.  The one-thread-per
--circuit thesis did NOT deliver the 5-20x it was pitched at.
+MEASURED RESULT: 0.395 us per evaluation of KERNEL at 32,256 threads and
+0.268 us at 129,024 -- **66x and 97x one Fortran core** -- so throughput is
+still climbing at 129k rather than saturating at 32k as the round-trip
+numbers used to suggest.  The round trip is 1.73-1.87 us per evaluation over
+the same range, which is a statement about PCIe and about this harness, not
+about the kernel.
 
 WHAT IS *NOT* THE BOTTLENECK (all measured, all negative results, recorded
 here so nobody re-runs them):
@@ -45,13 +52,28 @@ here so nobody re-runs them):
   so each warp is regime-homogeneous is worth only 1.06x (605 -> 571 ms),
   and pure single-regime batches land in the same band (SHORT 546, LONG
   585, SMOOTH 647 ms).
+* **Array-of-structures state layout, for /RAYS/ at least.**  COMMON /RAYS/
+  is 30,672 of the 55,652 bytes per thread, and at that stride a warp-wide
+  read of one float costs 32 transactions.  It was moved to
+  structure-of-arrays (cuda/raysview.cuh); with the kernel code held
+  IDENTICAL and only the stride changed, the kernel goes 129.1 -> 124.9 ms
+  at 32,256 threads.  **1.03x.**  The same 1.03x appears at 504, 2,016 and
+  8,064 threads, so it is not a residency artefact.
+* ... and the reason that lever is so short is that the kernel is nowhere
+  near bandwidth-bound.  Kernel time barely moves with batch size -- 63 ms
+  at 504 threads, 79 ms at 8,064, 127 ms at 32,256: 64x the work for 2x the
+  time.  A single circuit-hour costs ~62 ms of serially dependent latency on
+  one lane, and everything up to full residency is free because the machine
+  is hiding that latency behind other threads.  Coalescing helps a kernel
+  that is waiting on bandwidth; this one is waiting on its own dependency
+  chain, and the dependency chain is the program.
 
 So the cost is the scalar work itself -- a long, branchy, serially
 dependent program per thread -- not an overhead with a lever on it.  The
-remaining ideas are real but none is cheap: shrink the 55,652 B per-thread
-state (RaysState/IFOB is 30.7 kB of it), split LUFFY into several kernels
-so each has a smaller live set, or revisit the approximations in Tier 3 of
-the restructuring plan.
+remaining ideas are real but none is cheap: split LUFFY into several kernels
+so each has a smaller live set and a shorter chain, or revisit the
+approximations in Tier 3 of the restructuring plan.  Converting the other
+fifteen structs to SoA is NOT indicated by the /RAYS/ result.
 """
 
 import argparse
@@ -82,18 +104,42 @@ def _workload():
     return _replay()
 
 
-def _time_kernel(bufs, ipflags, iono, iono_idx, ant, ant_idx, reps, block):
+def _time(fn, reps):
     import cupy as cp
 
-    from voacap_gpu.stage_c.driver import launch_luffy
-
-    launch_luffy(bufs, ipflags, iono, iono_idx, ant, ant_idx, block=block)
+    fn()
     cp.cuda.runtime.deviceSynchronize()
     t0 = time.perf_counter()
     for _ in range(reps):
-        launch_luffy(bufs, ipflags, iono, iono_idx, ant, ant_idx, block=block)
+        fn()
     cp.cuda.runtime.deviceSynchronize()
     return (time.perf_counter() - t0) / reps
+
+
+def _time_kernel(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps,
+                 block):
+    """(kernel seconds, round-trip seconds) for one batch.
+
+    The two are reported separately because they are nothing like each other:
+    at 32k threads the round trip is ~600 ms of which the KERNEL is ~125 ms.
+    The rest is the per-thread state crossing PCIe, which a production driver
+    would not pay -- see the module docstring.
+    """
+    import cupy as cp
+
+    from voacap_gpu.stage_c.driver import launch_luffy, stage_luffy
+
+    run, state = stage_luffy(bufs, rays, ipflags, iono, iono_idx, ant,
+                             ant_idx, block=block)
+    kern = _time(run, reps)
+    # the staged batch has to GO before the round trip is timed: holding both
+    # resident at 129k threads spills the pool and measures the allocator
+    del run, state
+    cp.get_default_memory_pool().free_all_blocks()
+    trip = _time(lambda: launch_luffy(bufs, rays, ipflags, iono, iono_idx,
+                                      ant, ant_idx, block=block), reps)
+    cp.get_default_memory_pool().free_all_blocks()
+    return kern, trip
 
 
 def main():
@@ -104,20 +150,25 @@ def main():
     ap.add_argument("--block", type=int, default=32)
     args = ap.parse_args()
 
-    from voacap_gpu.stage_c.driver import (CIRCUIT_DTYPE, circuit_state_sizeof,
+    from voacap_gpu.stage_c.driver import (CIRCUIT_DTYPE,
+                                           STATE_BYTES_PER_THREAD,
+                                           circuit_state_sizeof,
                                            shared_antenna_tables,
                                            shared_iono_tables)
 
     w = _workload()
     base = w["entries"]
+    base_rays = w["entries_rays"]
     n0 = len(base)
     base_ipf = w["ipflags"]
     iono = shared_iono_tables(w["ionos"])
     ant = shared_antenna_tables(w["cants"])
     base_ii, base_ai = w["iono_idx"], w["ant_idx"]
 
-    print(f"per-thread state: {circuit_state_sizeof():,} B "
-          f"(host dtype {CIRCUIT_DTYPE.itemsize:,} B)")
+    print(f"per-thread state: {STATE_BYTES_PER_THREAD:,} B "
+          f"= CircuitState {circuit_state_sizeof():,} B (host dtype "
+          f"{CIRCUIT_DTYPE.itemsize:,} B) + SoA /RAYS/ "
+          f"{base_rays.dtype.itemsize:,} B")
     tags = w["tags"]
     mix = {t: tags.count(t) for t in sorted(set(tags))}
     print(f"base workload: {n0} real circuit-hours from the replay decks, "
@@ -129,36 +180,38 @@ def main():
     print(f"live frequency slots per circuit-hour: {nfreq:.1f} "
           f"(the Fortran baseline circuit runs 28)\n")
 
-    print(f"{'threads':>9} {'kernel ms':>10} {'us/circ-hr':>11} "
-          f"{'us/eval':>9} {'vs 1 core':>10} {'state GB':>9}")
-    print("-" * 64)
+    print(f"{'threads':>9} {'kernel ms':>10} {'us/eval':>9} {'vs 1 core':>10} "
+          f"| {'trip ms':>9} {'us/eval':>9} {'vs 1 core':>10} {'state GB':>9}")
+    print("-" * 88)
     for n in args.sizes:
         reps = max(1, n0 * args.reps // max(n, 1)) if n > 20000 else args.reps
         idx = np.arange(n) % n0
         bufs = base[idx]
+        rays = base_rays[idx]
         ipf = base_ipf[idx]
-        gb = n * CIRCUIT_DTYPE.itemsize / 1e9
+        gb = n * STATE_BYTES_PER_THREAD / 1e9
         if gb > 9.0:
             print(f"{n:>9,}  skipped -- {gb:.1f} GB of state exceeds the "
                   "budget on a 16 GB card")
             continue
         try:
-            sec = _time_kernel(bufs, ipf, iono, base_ii[idx], ant,
-                               base_ai[idx], reps, args.block)
+            kern, trip = _time_kernel(bufs, rays, ipf, iono, base_ii[idx],
+                                      ant, base_ai[idx], reps, args.block)
         except Exception as exc:                      # OOM or launch failure
             print(f"{n:>9,}  failed: {type(exc).__name__}: {exc}")
             continue
-        us = sec * 1e6 / n
-        per_eval = us / nfreq
-        speedup = FORTRAN_US_PER_EVAL / per_eval
-        print(f"{n:>9,} {sec * 1e3:>10.2f} {us:>11.3f} {per_eval:>9.3f} "
-              f"{speedup:>9.1f}x {gb:>9.2f}")
+        ke = kern * 1e6 / n / nfreq
+        te = trip * 1e6 / n / nfreq
+        print(f"{n:>9,} {kern * 1e3:>10.2f} {ke:>9.3f} "
+              f"{FORTRAN_US_PER_EVAL / ke:>9.1f}x | {trip * 1e3:>9.2f} "
+              f"{te:>9.3f} {FORTRAN_US_PER_EVAL / te:>9.1f}x {gb:>9.2f}")
 
     print(f"\nFortran baseline {FORTRAN_US_PER_EVAL:.1f} us per "
           "(circuit, hour, frequency), measured, ONE core.")
     print("A 32-core box running the same Fortran is ~32x that, so divide "
-          "the last column by 32 for the honest whole-machine comparison.")
-    print("Kernel time only; see the module docstring on pack/unpack.")
+          "the speedups by 32 for the honest whole-machine comparison.")
+    print("KERNEL is the compute; TRIP adds the per-thread state crossing "
+          "PCIe both ways, which a production driver would not pay.")
 
 
 if __name__ == "__main__":

@@ -63,6 +63,7 @@
 
 #include "constants.cuh"
 #include "f32math.cuh"
+#include "raysview.cuh"
 #include "regmod.cuh"
 #include "state.cuh"
 #include "xlin.cuh"
@@ -72,7 +73,7 @@
 // out if stage 3 changed it and REGMOD did not refuse.
 __device__ inline int inmuf(const LayerState* state, ModesState* modes,
                             MufState* muf, const SigdState* sigd,
-                            const AnoisState* anois, const RaysState* rays,
+                            const AnoisState* anois, const RaysView& rays,
                             const float* cant_array, const float* cant_aeff,
                             const int* cant_iats, const float* cant_xfqs,
                             const float* cant_xfqe, const float* cant_offazim,

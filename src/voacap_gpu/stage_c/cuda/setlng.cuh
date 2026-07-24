@@ -12,6 +12,7 @@
 #ifndef VOACAP_SETLNG_CUH
 #define VOACAP_SETLNG_CUH
 
+#include "raysview.cuh"
 #include "state.cuh"
 
 // One destination area's scalar + layer-parameter copy (areas src -> a).
@@ -39,7 +40,7 @@ __device__ inline void setlng_area_(LayerState* s, int a, int src) {
 
 // One destination area's ionogram copy (rows 1..30 of the (31, 6) arrays,
 // and IFOB's (41, 31, 6) block rows 1..40 x 1..30).
-__device__ inline void setlng_iono_(LayerState* s, RaysState* rays,
+__device__ inline void setlng_iono_(LayerState* s, const RaysView& rays,
                                     int a, int src) {
     for (int il = 1; il <= 30; ++il) {
         s->hprim[il * 6 + a] = s->hprim[il * 6 + src];
@@ -49,11 +50,10 @@ __device__ inline void setlng_iono_(LayerState* s, RaysState* rays,
     }
     for (int ia = 1; ia <= 40; ++ia)
         for (int il = 1; il <= 30; ++il)
-            rays->ifob[ia * 31 * 6 + il * 6 + a] =
-                rays->ifob[ia * 31 * 6 + il * 6 + src];
+            rv_ifob(rays, ia, il, a) = rv_ifob(rays, ia, il, src);
 }
 
-__device__ inline void setlng(LayerState* s, RaysState* rays) {
+__device__ inline void setlng(LayerState* s, const RaysView& rays) {
     // IF(KFX-3) 105,100,100  — KFX>=3: everything already filled.
     if (s->kfx >= 3)
         return;

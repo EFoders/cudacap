@@ -26,6 +26,7 @@
 #define VOACAP_GMLOSS_CUH
 
 #include "f32math.cuh"
+#include "raysview.cuh"
 #include "settxr.cuh"
 #include "state.cuh"
 
@@ -66,7 +67,7 @@ __device__ inline void gmloss_preset_(ZonState* zon) {
 // (LpathState, TXRGML written here).
 __device__ inline int gmloss(const LayerState* state, const MufState* muf,
                              const SigdState* sigd, ReflxState* reflx,
-                             LosxState* losx, const RaysState* rays,
+                             LosxState* losx, const RaysView& rays,
                              const float* cant_array, const float* cant_aeff,
                              const int* cant_iats, const float* cant_xfqs,
                              const float* cant_xfqe,

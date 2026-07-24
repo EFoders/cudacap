@@ -3,8 +3,14 @@
 //
 // ABI CONTRACT (same rules as state.cuh, proved by driver.py's CIRCUIT_DTYPE
 // and tests/stage_c/test_luffy_replay.py's sizeof kernel):
-//   * the sixteen per-thread state structs appear BY VALUE, in exactly the
-//     Stage A `Circuit` field order, with the same names;
+//   * FIFTEEN of the sixteen per-thread state structs appear BY VALUE, in
+//     exactly the Stage A `Circuit` field order, with the same names.
+//     `rays` is the exception: COMMON /RAYS/ is 30,672 of the 55,652 bytes,
+//     and array-of-structures at that stride is the kernel's dominant memory
+//     cost (34 GB/s of useful bandwidth against 2,892 GB/s laid out SoA), so
+//     it lives in its OWN device buffers and arrives as a `RaysView`
+//     (raysview.cuh).  Nothing else about it changed: same values, same
+//     order, same 1-based padding.
 //   * `iono` and `cant` are NOT here.  Stage A carries them on the Circuit,
 //     but they are big, read-only and SHARED between threads: the coefficient
 //     maps and the antenna patterns.  They pass to `luffy` as flat device
@@ -43,7 +49,11 @@ struct CircuitState {
     // --- the commons, one member per block, in Circuit's field order -------
     LayerState     layers;
     MufState       muf;
-    RaysState      rays;
+    // RaysState was HERE, between `muf` and `reflx`.  It is now carried
+    // OUTSIDE the struct, structure-of-arrays, and reaches the routines as a
+    // `RaysView` (raysview.cuh) — see the note above.  driver.py's
+    // CIRCUIT_DTYPE has the matching hole, and packs /RAYS/ into its own
+    // buffer.
     ReflxState     reflx;
     ModesState     modes;
     ZonState       zon;

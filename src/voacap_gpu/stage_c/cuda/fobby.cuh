@@ -14,16 +14,17 @@
 
 #include "constants.cuh"
 #include "f32math.cuh"
+#include "raysview.cuh"
 #include "state.cuh"
 
-__device__ inline void fobby(const LayerState* state, RaysState* rays,
+// rays: RaysView over /RAYS/ — ANG/NANG read, IFOB written.
+__device__ inline void fobby(const LayerState* state, const RaysView& rays,
                              int k) {
     const float* fvert = state->fvert;
     const float* htrue = state->htrue;
-    const float* ang = rays->ang;
-    int* ifob = rays->ifob;
-    for (int ia = 1; ia <= rays->nang; ++ia) {  // DO 650 IA=1,NANG
-        float del_ = ang[ia] * VC_D2R;
+    int nang = rv_nang(rays);
+    for (int ia = 1; ia <= nang; ++ia) {        // DO 650 IA=1,NANG
+        float del_ = rv_ang(rays, ia) * VC_D2R;
         float rcosd = VC_RZ * cos32(del_);
         for (int ih = 1; ih < 31; ++ih) {       // DO 645 IH=1,30
             float fv = fvert[ih * 6 + k];
@@ -34,7 +35,7 @@ __device__ inline void fobby(const LayerState* state, RaysState* rays,
             float cphe = sqrt32(sqcos);
             float freq = fv / cphe;
             // REAL->INT truncates
-            ifob[(ia * 31 + ih) * 6 + k] = (int)(1000.0f * freq);
+            rv_ifob(rays, ia, ih, k) = (int)(1000.0f * freq);
         }
     }
 }

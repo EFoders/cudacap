@@ -37,7 +37,9 @@ _SRC = r'''
 extern "C" __global__ void drive(const LayerState* ls, RaysState* rs, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    fobby(&ls[i], &rs[i], 1);
+    // rays_view_of() is the stride-1 view: byte-for-byte the packed struct
+    // this test has always built, which is what proves the SoA refactor inert.
+    fobby(&ls[i], rays_view_of(&rs[i]), 1);
 }
 '''
 

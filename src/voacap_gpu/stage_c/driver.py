@@ -22,6 +22,23 @@ ABI already carries.
 shared between threads, so they move once as flat device arrays and each
 thread gets an index into them.
 
+/RAYS/ IS NOT IN THE DTYPE EITHER, and for a completely different reason
+--------------------------------------------------------------------------
+``RaysState`` is 30,672 of the old 55,652 bytes per thread.  Carried inside
+CircuitState it made adjacent lanes of a warp 55,652 bytes apart, so every
+warp-wide read of one float cost 32 memory transactions -- measured at that
+stride, 34 GB/s of useful bandwidth against 2,892 GB/s for the same data laid
+out structure-of-arrays.  So /RAYS/ now lives in its OWN device buffers,
+transposed to SoA: element ``o`` of thread ``t`` is at ``o * n + t``.  The
+device sees it through ``cuda/raysview.cuh``'s ``RaysView``; the host still
+packs and unpacks an ordinary ``(N,) RAYS_DTYPE`` array, and this module does
+the transpose on the device (a couple of milliseconds at 32k threads) so the
+callers' buffers keep their obvious per-circuit shape.
+
+``pack_circuit`` therefore returns a PAIR -- ``(circuit_buffer, rays_buffer)``
+-- and ``unpack_circuit`` takes the same pair back.  Together they are still
+the whole Stage A ``Circuit``, field for field.
+
 /SON/ MDL
 ---------
 ``pack_son``/``unpack_son`` encode ``mdl``/``mode``/``moder`` as LAYTYP
@@ -61,10 +78,11 @@ MDL_CODE = {"": -1, " ": 0, "S": 1, "L": 2, "M": 3}
 MDL_LABEL = {v: k for k, v in MDL_CODE.items()}
 
 # (Circuit attribute, per-struct dtype, pack fn, unpack fn), in Circuit order.
+# `rays` is deliberately absent -- see the module docstring; it travels in its
+# own SoA buffers, packed by `pack_rays` / `unpack_rays` straight from here.
 _BLOCKS = (
     ("layers", LAYER_DTYPE, pack_layer, unpack_layer),
     ("muf", MUF_DTYPE, pack_muf, unpack_muf),
-    ("rays", RAYS_DTYPE, pack_rays, unpack_rays),
     ("reflx", REFLX_DTYPE, pack_reflx, unpack_reflx),
     ("modes", MODES_DTYPE, pack_modes, unpack_modes),
     ("zon", ZON_DTYPE, pack_zon, unpack_zon),
@@ -94,6 +112,24 @@ _SCALARS = (
 
 CIRCUIT_DTYPE = np.dtype([(n, dt) for n, dt, _, _ in _BLOCKS]
                          + list(_SCALARS))
+
+# --- the SoA /RAYS/ buffers ------------------------------------------------
+# RAYS_DTYPE is all-4-byte, so one packed RaysState is exactly _RAYS_WORDS
+# int32 words and the AoS -> SoA move is a plain (N, W) -> (W, N) transpose of
+# the raw words.  `_RAYS_OFF` is each field's word offset inside a row.
+_RAYS_WORDS = RAYS_DTYPE.itemsize // 4
+_RAYS_OFF = {n: RAYS_DTYPE.fields[n][1] // 4 for n in RAYS_DTYPE.names}
+_RAYS_LEN = {n: int(np.prod(RAYS_DTYPE.fields[n][0].shape or (1,)))
+             for n in RAYS_DTYPE.names}
+
+# Threads per staging chunk when moving /RAYS/ across the bus.  The transpose
+# needs a second copy of whatever it holds, so this bounds the peak overhead
+# at ~512 MB rather than a second copy of the whole batch (4 GB at 129k
+# threads, which will not fit alongside everything else on a 16 GB card).
+_RAYS_CHUNK = max(1, 512_000_000 // RAYS_DTYPE.itemsize)
+
+# One thread's total state, for callers budgeting device memory.
+STATE_BYTES_PER_THREAD = CIRCUIT_DTYPE.itemsize + RAYS_DTYPE.itemsize
 
 # Flat table extents, one circuit's worth of each (redmap.py shapes).
 _IONO_TABLES = (("fam", (14, 12)), ("dud", (5, 12, 5)),
@@ -131,11 +167,12 @@ def _unpack_son_mdl(buf, son):
 # whole-circuit pack / unpack
 # ---------------------------------------------------------------------------
 
-def pack_circuit(circ) -> np.ndarray:
-    """One Stage A Circuit -> a shape-() array of CIRCUIT_DTYPE.
+def pack_circuit(circ):
+    """One Stage A Circuit -> ``(CIRCUIT_DTYPE, RAYS_DTYPE)`` shape-() arrays.
 
     `iono` and `cant` are deliberately absent: they are shared tables, moved
-    once by ``shared_iono_tables`` / ``shared_antenna_tables``.
+    once by ``shared_iono_tables`` / ``shared_antenna_tables``.  /RAYS/ is
+    absent from the first buffer and IS the second: see the module docstring.
     """
     buf = np.zeros((), dtype=CIRCUIT_DTYPE)
     for name, _dt, pack, _un in _BLOCKS:
@@ -148,16 +185,17 @@ def pack_circuit(circ) -> np.ndarray:
             buf[name] = I32(bool(circ.want_service_prob))
         else:
             buf[name] = getattr(circ, name)
-    return buf
+    return buf, pack_rays(circ.rays)
 
 
-def unpack_circuit(buf, circ):
-    """Write a (mutated) CIRCUIT_DTYPE buffer back into a Stage A Circuit.
+def unpack_circuit(buf, rays_buf, circ):
+    """Write a (mutated) state pair back into a Stage A Circuit.
 
     Array fields are filled in place, so anything holding a reference to a
     sub-state keeps seeing the same object.  ``nyear`` comes back as the
     canonical string for its flag, which is all the flag can distinguish.
     """
+    unpack_rays(rays_buf, circ.rays)
     for name, _dt, _pack, unpack in _BLOCKS:
         obj = getattr(circ, name)
         if unpack is None:
@@ -229,7 +267,9 @@ _KERNEL_SRC = r'''
 #include "luffy.cuh"
 
 extern "C" __global__ void luffy_batch(
-        CircuitState* circ, const int* ipflag,
+        CircuitState* circ,
+        int* rays_nang, float* rays_ang, int* rays_ifob,
+        const int* ipflag,
         const int* iono_idx, const int* ant_idx,
         const float* fam, const float* dud, const float* fakp,
         const float* fakmap, const float* hmym, const float* fakabp,
@@ -241,7 +281,8 @@ extern "C" __global__ void luffy_batch(
         int* status, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    status[i] = luffy(&circ[i], fam, dud, fakp, fakmap, hmym, fakabp, abmap,
+    status[i] = luffy(&circ[i], rays_nang, rays_ang, rays_ifob, n, i,
+                      fam, dud, fakp, fakmap, hmym, fakabp, abmap,
                       sys, perr, f2d111, ant_array, ant_aeff, ant_iats,
                       ant_xfqs, ant_xfqe, ant_offazim, ant_pwrdba, numants,
                       iono_idx[i], ant_idx[i], ipflag[i]);
@@ -267,24 +308,72 @@ def circuit_state_sizeof() -> int:
     return int(cp.asnumpy(out)[0])
 
 
-def launch_luffy(bufs, ipflags, iono, iono_idx, ant, ant_idx, block=32):
-    """Run N packed circuit-hours, one thread each.
+def _rays_to_soa(rays_bufs, n):
+    """(N,) RAYS_DTYPE on the host -> one (words, N) int32 device array.
 
-    bufs:      (N,) array of CIRCUIT_DTYPE — the ENTRY states, not mutated
-    ipflags:   (N,) int
-    iono/ant:  the dicts ``shared_iono_tables`` / ``shared_antenna_tables``
-               return
-    iono_idx / ant_idx: (N,) int, which shared table each thread uses
+    Staged in chunks: the transpose needs somewhere to land, and a whole
+    second copy of /RAYS/ is 1 GB at 32k threads.
+    """
+    import cupy as cp
 
-    Returns ``(out_bufs, status)``: the mutated states and the per-thread
-    LUFFY status (0 = success, non-zero = the refusal a callee reported).
+    d_soa = cp.empty((_RAYS_WORDS, n), np.int32)
+    for s in range(0, n, _RAYS_CHUNK):
+        e = min(n, s + _RAYS_CHUNK)
+        blk = cp.asarray(rays_bufs[s:e].view(np.uint8))
+        d_soa[:, s:e] = blk.view(np.int32).reshape(e - s, _RAYS_WORDS).T
+    return d_soa
+
+
+def _rays_from_soa(d_soa, n):
+    """The inverse: one (words, N) int32 device array -> (N,) RAYS_DTYPE.
+
+    ``get(out=...)`` lands the transposed block straight in the destination
+    rows; going through ``cp.asnumpy`` would add a full host-side copy of the
+    whole batch, which at 32k threads is a gigabyte for nothing.
+    """
+    import cupy as cp
+
+    flat = np.empty((n, _RAYS_WORDS), np.int32)
+    for s in range(0, n, _RAYS_CHUNK):
+        e = min(n, s + _RAYS_CHUNK)
+        blk = cp.ascontiguousarray(d_soa[:, s:e].T)
+        blk.get(out=flat[s:e])
+    return flat.view(RAYS_DTYPE).reshape(n)
+
+
+def _rays_views(d_soa):
+    """The three base pointers the kernel takes, as views into `d_soa`."""
+    o, ln = _RAYS_OFF, _RAYS_LEN
+    d_nang = d_soa[o["nang"]:o["nang"] + ln["nang"]]
+    d_ang = d_soa[o["ang"]:o["ang"] + ln["ang"]].view(np.float32)
+    d_ifob = d_soa[o["ifob"]:o["ifob"] + ln["ifob"]]
+    return d_nang, d_ang, d_ifob
+
+
+def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
+                block=32):
+    """Move one batch to the device; return the staged launch, not the result.
+
+    Split out of ``launch_luffy`` so a benchmark can time the KERNEL without
+    the bus.  That distinction turned out to matter a great deal: at 32k
+    threads the whole ``launch_luffy`` takes ~600 ms of which the kernel is
+    ~125 ms, so timing the round trip measures PCIe, not compute.
+
+    Returns ``(run, state)`` — call ``run()`` to launch (as many times as you
+    like; the kernel mutates the staged state in place), and pass ``state`` to
+    ``fetch_luffy`` to read the answer back.
     """
     import cupy as cp
 
     bufs = np.ascontiguousarray(bufs)
+    rays_bufs = np.ascontiguousarray(rays_bufs)
     assert bufs.dtype == CIRCUIT_DTYPE, bufs.dtype
+    assert rays_bufs.dtype == RAYS_DTYPE, rays_bufs.dtype
     n = bufs.shape[0]
+    assert rays_bufs.shape[0] == n, (rays_bufs.shape, n)
     d_circ = cp.asarray(bufs.view(np.uint8))
+    d_soa = _rays_to_soa(rays_bufs, n)
+    d_nang, d_ang, d_ifob = _rays_views(d_soa)
     d = {k: cp.asarray(v) for k, v in iono.items()}
     a = {k: cp.asarray(v) for k, v in ant.items() if k != "numants"}
     d_ipflag = cp.asarray(np.ascontiguousarray(ipflags, I32))
@@ -294,15 +383,50 @@ def launch_luffy(bufs, ipflags, iono, iono_idx, ant, ant_idx, block=32):
 
     fn = load_kernel().get_function("luffy_batch")
     grid = ((n + block - 1) // block,)
-    fn(grid, (block,),
-       (d_circ, d_ipflag, d_ii, d_ai,
-        d["fam"], d["dud"], d["fakp"], d["fakmap"], d["hmym"], d["fakabp"],
-        d["abmap"], d["sys"], d["perr"], d["f2d111"],
-        a["array"], a["aeff"], a["iats"], a["xfqs"], a["xfqe"], a["offazim"],
-        a["pwrdba"], np.int32(ant["numants"]), d_status, np.int32(n)))
+    args = (d_circ, d_nang, d_ang, d_ifob, d_ipflag, d_ii, d_ai,
+            d["fam"], d["dud"], d["fakp"], d["fakmap"], d["hmym"],
+            d["fakabp"], d["abmap"], d["sys"], d["perr"], d["f2d111"],
+            a["array"], a["aeff"], a["iats"], a["xfqs"], a["xfqe"],
+            a["offazim"], a["pwrdba"], np.int32(ant["numants"]), d_status,
+            np.int32(n))
+
+    def run():
+        fn(grid, (block,), args)
+
+    return run, (d_circ, d_soa, d_status, n)
+
+
+def fetch_luffy(state):
+    """The staged device state -> ``(out_bufs, out_rays, status)``."""
+    import cupy as cp
+
+    d_circ, d_soa, d_status, n = state
     cp.cuda.runtime.deviceSynchronize()
     out = cp.asnumpy(d_circ).view(CIRCUIT_DTYPE)
-    return out, cp.asnumpy(d_status)
+    out_rays = _rays_from_soa(d_soa, n)
+    return out, out_rays, cp.asnumpy(d_status)
+
+
+def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
+                 block=32):
+    """Run N packed circuit-hours, one thread each.
+
+    bufs:      (N,) array of CIRCUIT_DTYPE — the ENTRY states, not mutated
+    rays_bufs: (N,) array of RAYS_DTYPE — /RAYS/, likewise not mutated; it
+               goes to the device transposed to structure-of-arrays
+    ipflags:   (N,) int
+    iono/ant:  the dicts ``shared_iono_tables`` / ``shared_antenna_tables``
+               return
+    iono_idx / ant_idx: (N,) int, which shared table each thread uses
+
+    Returns ``(out_bufs, out_rays, status)``: the mutated states and the
+    per-thread LUFFY status (0 = success, non-zero = the refusal a callee
+    reported).
+    """
+    run, state = stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant,
+                             ant_idx, block=block)
+    run()
+    return fetch_luffy(state)
 
 
 def run_luffy(circuits, ipflags, block=32, write_back=True):
@@ -333,12 +457,14 @@ def run_luffy(circuits, ipflags, block=32, write_back=True):
             cants.append(c.cant)
         ant_idx.append(seen_a[ka])
 
-    bufs = np.stack([pack_circuit(c) for c in circuits])
-    out, status = launch_luffy(bufs, ipflags, shared_iono_tables(ionos),
-                               np.array(iono_idx, I32),
-                               shared_antenna_tables(cants),
-                               np.array(ant_idx, I32), block=block)
+    packed = [pack_circuit(c) for c in circuits]
+    bufs = np.stack([p[0] for p in packed])
+    rays_bufs = np.stack([p[1] for p in packed])
+    out, out_rays, status = launch_luffy(
+        bufs, rays_bufs, ipflags, shared_iono_tables(ionos),
+        np.array(iono_idx, I32), shared_antenna_tables(cants),
+        np.array(ant_idx, I32), block=block)
     if write_back:
-        for c, b in zip(circuits, out):
-            unpack_circuit(b, c)
+        for c, b, r in zip(circuits, out, out_rays):
+            unpack_circuit(b, r, c)
     return circuits, status
