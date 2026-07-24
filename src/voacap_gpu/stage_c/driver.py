@@ -523,16 +523,23 @@ extern "C" __global__ void luffy_batch_warp(
     extern __shared__ SmoothStore warp_store[];
     int lane = threadIdx.x & 31;
     int wib = threadIdx.x >> 5;                 // warp index in the block
-    int i = blockIdx.x * (blockDim.x >> 5) + wib;
+    // VC_WARP_GROUPS packs that many circuit-hours into one warp; each gets
+    // VC_WARP_GLANES contiguous lanes and every collective in luffy_warp.cuh
+    // is group-local.  At the default 1 these fold away: grp is 0, slot is
+    // wib, and the lane test is `lane == 0`, i.e. the code below is exactly
+    // what it was before packing existed.
+    int grp = lane / VC_WARP_GLANES;
+    int slot = wib * VC_WARP_GROUPS + grp;
+    int i = blockIdx.x * ((blockDim.x >> 5) * VC_WARP_GROUPS) + slot;
     if (i >= n) return;
     LaneState L;
     int st = luffy_warp(&circ[i], rays_nang, rays_ang, rays_ifob, n, i,
-                        &L, &warp_store[wib], lane,
+                        &L, &warp_store[slot], lane,
                         fam, dud, fakp, fakmap, hmym, fakabp, abmap,
                         sys, perr, f2d111, ant_array, ant_aeff, ant_iats,
                         ant_xfqs, ant_xfqe, ant_offazim, ant_pwrdba, numants,
                         iono_idx[i], ant_idx[i], ipflag[i]);
-    if (lane == 0)
+    if ((lane & (VC_WARP_GLANES - 1)) == 0)
         status[i] = st;
 }
 
@@ -542,9 +549,29 @@ extern "C" __global__ void circuit_sizeof(int* out) {
 '''
 
 
-def load_kernel():
-    """Compile (once, cached) the LUFFY batch kernel module."""
-    return load(_KERNEL_SRC)
+def load_kernel(groups: int = 1, fast_math: bool = False):
+    """Compile (once, cached per option set) the LUFFY batch kernel module.
+
+    ``groups`` packs that many circuit-hours into ONE warp for
+    ``luffy_batch_warp`` -- 12 frequencies need at least 12 lanes, so 1 and 2
+    are the legal values.  2 lifts lane utilisation from 12/32 to 24/32 and
+    moves the crossover against the thread kernel a long way right; see
+    cuda/luffy_warp.cuh.  It changes nothing about the thread kernel.
+
+    ``fast_math`` selects the opt-in native-f32 libm (see cuda/f32math.cuh).
+    It is NOT bit-exact against Stage A -- tests/stage_c/test_fastmath.py is
+    what pins what it costs -- so it is off unless asked for.
+    """
+    if groups not in (1, 2):
+        raise ValueError(
+            f"VC_WARP_GROUPS must be 1 or 2 (NFREQ=12 needs >=12 lanes per "
+            f"group), got {groups}")
+    opts = ()
+    if groups != 1:
+        opts += (f"-DVC_WARP_GROUPS={groups}",)
+    if fast_math:
+        opts += ("-DVOACAP_FAST_MATH",)
+    return load(_KERNEL_SRC, opts)
 
 
 def circuit_state_sizeof() -> int:
@@ -732,7 +759,8 @@ SMOOTHSTORE_BYTES = (20 * 14 * 3 + 5 * 14) * 4
 
 
 def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
-                block=32, warp=False, warps_per_block=4, upload="full"):
+                block=32, warp=False, warps_per_block=4, upload="full",
+                groups=1, fast_math=False):
     """Move one batch to the device; return the staged launch, not the result.
 
     Split out of ``launch_luffy`` so a benchmark can time the KERNEL without
@@ -791,16 +819,19 @@ def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
             np.int32(n))
 
     if warp:
-        fn = load_kernel().get_function("luffy_batch_warp")
+        fn = load_kernel(groups, fast_math).get_function("luffy_batch_warp")
         wpb = int(warps_per_block)
-        grid = ((n + wpb - 1) // wpb,)
+        # one warp carries `groups` circuit-hours, so a block carries
+        # wpb * groups of them and needs that many SmoothStore rows
+        per_block = wpb * int(groups)
+        grid = ((n + per_block - 1) // per_block,)
         blk = (32 * wpb,)
-        shared = wpb * SMOOTHSTORE_BYTES
+        shared = per_block * SMOOTHSTORE_BYTES
 
         def run():
             fn(grid, blk, args, shared_mem=shared)
     else:
-        fn = load_kernel().get_function("luffy_batch")
+        fn = load_kernel(fast_math=fast_math).get_function("luffy_batch")
         grid = ((n + block - 1) // block,)
 
         def run():
@@ -878,7 +909,8 @@ def fetch_results(state):
 
 
 def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
-                 block=32, warp=False, warps_per_block=4, upload="full"):
+                 block=32, warp=False, warps_per_block=4, upload="full",
+                 groups=1, fast_math=False):
     """Run N packed circuit-hours, one thread each.
 
     bufs:      (N,) array of CIRCUIT_DTYPE — the ENTRY states, not mutated
@@ -895,13 +927,15 @@ def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     """
     run, state = stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant,
                              ant_idx, block=block, warp=warp,
-                             warps_per_block=warps_per_block, upload=upload)
+                             warps_per_block=warps_per_block, upload=upload,
+                             groups=groups, fast_math=fast_math)
     run()
     return fetch_luffy(state)
 
 
 def luffy_results(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
-                  block=32, warp=False, warps_per_block=4):
+                  block=32, warp=False, warps_per_block=4,
+                  groups=1, fast_math=False):
     """The production round trip: inputs up, results back, nothing else.
 
     Same arguments as ``launch_luffy``, same numbers out -- but 3,228 bytes a
@@ -911,7 +945,8 @@ def luffy_results(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     run, state = stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant,
                              ant_idx, block=block, warp=warp,
                              warps_per_block=warps_per_block,
-                             upload="inputs")
+                             upload="inputs", groups=groups,
+                             fast_math=fast_math)
     run()
     return fetch_results(state)
 

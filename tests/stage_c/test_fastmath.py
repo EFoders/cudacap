@@ -152,19 +152,26 @@ DISCRETE_EXEMPT = {"rays.ifob"}
 _FAST = {}
 
 
-def fast_kernel_module():
+def fast_kernel_module(groups=1, fast_math=False):
     """The LUFFY batch module, compiled with -DVOACAP_FAST_MATH.
 
     Same source, same strict options (--fmad=false and friends still hold --
     fast math is about libm, not about FMA contraction), one extra -D.
+
+    The signature mirrors ``driver.load_kernel``, which ``stage_luffy`` now
+    calls with ``groups``/``fast_math``; ``fast_math`` is ignored because this
+    shim's whole job is to force it on.  ``groups`` IS honoured, so the A/B
+    still works if a caller packs circuit-hours per warp.
     """
-    if "m" not in _FAST:
+    key = int(groups)
+    if key not in _FAST:
         src = getattr(drv, "_KERNEL_SRC", None)
         assert src is not None, ("stage_c.driver no longer exposes "
                                  "_KERNEL_SRC; this A/B needs the same "
                                  "translation unit the strict build uses")
-        _FAST["m"] = load(src, extra_opts=FAST_OPT)
-    return _FAST["m"]
+        opts = FAST_OPT + ((f"-DVC_WARP_GROUPS={key}",) if key != 1 else ())
+        _FAST[key] = load(src, extra_opts=opts)
+    return _FAST[key]
 
 
 @contextlib.contextmanager

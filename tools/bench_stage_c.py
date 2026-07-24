@@ -165,15 +165,24 @@ def _time(fn, reps):
     return (time.perf_counter() - t0) / reps
 
 
-def _time_warp(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps, wpb):
+def _time_warp(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps, wpb,
+               groups=1):
     """Kernel-only seconds for ``luffy_batch_warp`` — one WARP per
-    circuit-hour, lane L on frequency L+1 (cuda/luffy_warp.cuh)."""
+    circuit-hour, lane L on frequency L+1 (cuda/luffy_warp.cuh).
+
+    ``groups=2`` packs TWO circuit-hours into each warp, sixteen lanes each,
+    lifting lane use from 12/32 to 24/32.  It costs a little at small batch
+    (the setup then splits over 16 lanes instead of 32) and wins at large,
+    which is the whole point: it moves the crossover against the thread
+    kernel a long way right.
+    """
     import cupy as cp
 
     from voacap_gpu.stage_c.driver import stage_luffy
 
     run, state = stage_luffy(bufs, rays, ipflags, iono, iono_idx, ant,
-                             ant_idx, warp=True, warps_per_block=wpb)
+                             ant_idx, warp=True, warps_per_block=wpb,
+                             groups=groups)
     t = _time(run, reps)
     del run, state
     cp.get_default_memory_pool().free_all_blocks()
@@ -310,10 +319,10 @@ def _warp_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
 
     from voacap_gpu.stage_c.driver import STATE_BYTES_PER_THREAD
 
-    print(f"{'circ-hours':>11} {'thread ms':>10} {'us/eval':>9} "
-          f"| {'warp ms':>9} {'us/eval':>9} | {'speedup':>8} "
-          f"{'vs 1 core':>10}")
-    print("-" * 74)
+    print(f"{'circ-hours':>11} {'thread':>9} {'us/ev':>7} "
+          f"| {'warp':>9} {'us/ev':>7} | {'packed':>9} {'us/ev':>7} "
+          f"| {'best':>7} {'vs 1 core':>10}")
+    print("-" * 88)
     for n in args.sizes:
         reps = max(1, n0 * args.reps // max(n, 1)) if n > 20000 else args.reps
         idx = np.arange(n) % n0
@@ -328,15 +337,24 @@ def _warp_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
             cp.get_default_memory_pool().free_all_blocks()
             wk = _time_warp(bufs, rays, ipf, iono, ii, ant, ai, reps,
                             args.wpb)
+            cp.get_default_memory_pool().free_all_blocks()
+            pk = _time_warp(bufs, rays, ipf, iono, ii, ant, ai, reps,
+                            args.wpb, groups=2)
         except Exception as exc:
             print(f"{n:>11,}  failed: {type(exc).__name__}: {exc}")
             continue
         ke = kern * 1e6 / n / nfreq
         we = wk * 1e6 / n / nfreq
-        print(f"{n:>11,} {kern * 1e3:>10.2f} {ke:>9.3f} "
-              f"| {wk * 1e3:>9.2f} {we:>9.3f} | {kern / wk:>7.2f}x "
-              f"{FORTRAN_US_PER_EVAL / we:>9.1f}x")
+        pe = pk * 1e6 / n / nfreq
+        best = min(ke, we, pe)
+        print(f"{n:>11,} {kern * 1e3:>9.2f} {ke:>7.3f} "
+              f"| {wk * 1e3:>9.2f} {we:>7.3f} | {pk * 1e3:>9.2f} {pe:>7.3f} "
+              f"| {ke / best:>6.2f}x {FORTRAN_US_PER_EVAL / best:>9.1f}x")
     print(f"\n{args.wpb} warps/block.  KERNEL-only, batch already resident.")
+    print("'packed' is the warp kernel with VC_WARP_GROUPS=2 -- two "
+          "circuit-hours per warp, 24 of 32 lanes busy.")
+    print("'best' is the fastest of the three against the thread kernel; "
+          "'vs 1 core' uses that best.")
     print(f"Fortran baseline {FORTRAN_US_PER_EVAL:.1f} us per "
           "(circuit, hour, frequency), measured, ONE core.")
 
