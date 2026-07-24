@@ -62,12 +62,14 @@ written; see ``_no_luf``.
 never read) and IXHP (a hop counter incremented and never read).  Noted where
 they would go rather than transcribed.
 
-**The 7000-10000 km recycle is not ported.**  With MSPEC 121 in that band the
-routine runs the short path, jumps back to label 83 with IPFLAG forced to
-200, runs the long path, and blends the two per frequency (lines 330-369 save
-the /SON/ columns into (13,2) temporaries; 396-524 do the blend).  Both arms
-of that now exist, but the recycle and the smoothing itself do not, so
-``_after_loop`` still refuses there.
+**The 7000-10000 km recycle IS ported** (it was the last piece; see
+``lsmooth.py``).  With MSPEC 121 in that band the routine runs the short path,
+jumps back to label 83 with IPFLAG forced to 200, runs the long path, and
+blends the two per frequency: ``save_pass`` stores each pass's /SON/ columns
+into the (13,2) temporaries and ``blend`` combines them on POWER, so the band
+joins both pure models with no step.  ``_after_loop`` returns "go round again"
+for pass one of a smoothing circuit rather than refusing.  Nothing in LUFFY
+refuses any more.
 """
 
 from .allmodes import allmodes
