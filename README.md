@@ -2,6 +2,8 @@
 
 A GPU rewrite of **VOACAP** (Voice of America Coverage Analysis Program) HF ionospheric propagation prediction, validated bit-for-bit against the original Fortran. One CUDA thread runs one whole circuit-hour, so tens of thousands of circuits compute concurrently on a single GPU. The theoretical increase in performance is much higher than what we have achieved today, due to the nature of how IONCAP was written originally in Fortran. Some effort has been put in to restructure the engine without impacting correctness. 
 
+This project was done in support of Prop-SL, an HF, LF and VLF propagation platform made while working in strategic HF communications. Prop-SL is property of the Department of National Defence, and the Government of Canada, but this project was made in my own time to support it and is free to build upon.
+
 The point-to-point prediction engine is ported end to end and runs on the GPU. On an RTX 5080 it computes a
 world-scale batch **~15× faster than the original Fortran across all 32 cores**
 of this machine (and bit-exact against a single-core run when fast-math is
