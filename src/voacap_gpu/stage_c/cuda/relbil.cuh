@@ -50,20 +50,42 @@ __device__ inline float relbil_in_sigmas_(float z, float spread) {
     return z / div32(spread, VC_DCL);
 }
 
-// allm: AllModeState (CREL/RELY/NREL written back); anois: AnoisState;
-// sigd: SigdState (DSLF/DSUF used as scratch); son: SonState, the output
-// column; the cant_* pointers are /cantenna/ + /pantenna/ for PWRDB.
-// ifx: frequency index; freq: MHz; rsn: required S/N; lufp: the required
-// reliability in percent.  Returns 0, or 1 where Stage A raises IndexError.
-__device__ inline int relbil(AllModeState* allm, const AnoisState* anois,
-                             SigdState* sigd, SonState* son,
-                             const int* cant_iats, const float* cant_xfqs,
-                             const float* cant_xfqe, const float* cant_pwrdba,
-                             int numants, int ifx, float freq, float rsn,
-                             int lufp) {
+// THE /DON/ TRIPLE, LIFTED OUT — and why this file is split in two.
+//
+// D10R/D50R/D90R live in /SON/ as SCALARS, not per-frequency columns.  RELBIL
+// assigns them only inside the two conditional blocks below, but the tail
+// reads them unconditionally, so a frequency whose modes are all dead answers
+// from the PREVIOUS frequency's triple.  That is a genuine sequential
+// dependency down the DO-265 loop and part of the answer.
+//
+// `relbil` itself is unchanged: it still reads and writes son->d10r/d50r/d90r
+// and returns exactly what it returned before.  The split exists for the
+// warp-per-circuit-hour kernel (cuda/luffy_warp.cuh), which runs the twelve
+// frequencies on twelve LANES and therefore has to resolve the carry with a
+// warp scan BETWEEN the writing half and the reading half.  Nothing else
+// crosses the seam: `relbil_head` performs every write except the tail's, and
+// `relbil_tail` performs every read of the triple.
+struct RelbilDon {
+    float d10r;
+    float d50r;
+    float d90r;
+};
+
+// The writing half: parts 1-3 plus the two gains.  *ran comes back 0 when
+// NMMOD <= 0, which is the whole-call no-op; *wrote comes back non-zero when
+// the /DON/ triple was assigned (so a scan can tell "carried" from "fresh");
+// *ir_out is the chosen mode, which the tail needs.  Never fails.
+__device__ inline void relbil_head(AllModeState* allm, const AnoisState* anois,
+                                   SigdState* sigd, SonState* son, int ifx,
+                                   float rsn, RelbilDon* don, int* ran,
+                                   int* wrote, int* ir_out) {
+    *ran = 0;
+    *wrote = 0;
+    *ir_out = 0;
     int inum = allm->nmmod;
     if (inum <= 0)
-        return 0;
+        return;
+    *ran = 1;
     float du2 = anois->du * anois->du;
     float dl2 = anois->dl * anois->dl;
 
@@ -77,14 +99,15 @@ __device__ inline int relbil(AllModeState* allm, const AnoisState* anois,
         sigd->dslf = allm->tllow[im];
         sigd->dsuf = allm->tlhgh[im];
         // the crossing is deliberate: a bad hour is high noise AND low signal
-        son->d10r = sqrt32(du2 + sigd->dslf * sigd->dslf);
-        son->d50r = allm->sn[im];
-        son->d90r = sqrt32(dl2 + sigd->dsuf * sigd->dsuf);
-        float z = rsn - son->d50r;
+        don->d10r = sqrt32(du2 + sigd->dslf * sigd->dslf);
+        don->d50r = allm->sn[im];
+        don->d90r = sqrt32(dl2 + sigd->dsuf * sigd->dsuf);
+        *wrote = 1;
+        float z = rsn - don->d50r;
         if (z <= 0.0f)
-            z = relbil_in_sigmas_(z, son->d10r);
+            z = relbil_in_sigmas_(z, don->d10r);
         else
-            z = relbil_in_sigmas_(z, son->d90r);
+            z = relbil_in_sigmas_(z, don->d90r);
         allm->rely[im] = 1.0f - fnorml(z);
         allm->crel[im] = 1000.0f;                   // "CREL is not used now"
     }
@@ -124,7 +147,7 @@ __device__ inline int relbil(AllModeState* allm, const AnoisState* anois,
     }
     // IRmethod 3 would fall back to IRmax when RELY(IR) < .01
     allm->nrel = ir;
-    int ilayer = allm->nmode[ir];
+    *ir_out = ir;
 
     // ---- 3. the frequency's summary ---------------------------------------
     if (inum == 1) {
@@ -188,25 +211,40 @@ __device__ inline int relbil(AllModeState* allm, const AnoisState* anois,
         son->sndb[ifx] = allm->sn[ir] + delsig;
 
         // redo the reliability against the combined distribution
-        son->d10r = sqrt32(du2 + son->dblosl[ifx] * son->dblosl[ifx]);
-        son->d50r = son->sndb[ifx];
-        son->d90r = sqrt32(dl2 + son->dblosu[ifx] * son->dblosu[ifx]);
-        if (son->d10r < VR_MIN_SPREAD)
-            son->d10r = VR_MIN_SPREAD;
-        if (son->d90r > VR_MAX_SPREAD)
-            son->d90r = VR_MAX_SPREAD;
-        float z = rsn - son->d50r;
+        don->d10r = sqrt32(du2 + son->dblosl[ifx] * son->dblosl[ifx]);
+        don->d50r = son->sndb[ifx];
+        don->d90r = sqrt32(dl2 + son->dblosu[ifx] * son->dblosu[ifx]);
+        if (don->d10r < VR_MIN_SPREAD)
+            don->d10r = VR_MIN_SPREAD;
+        if (don->d90r > VR_MAX_SPREAD)
+            don->d90r = VR_MAX_SPREAD;
+        *wrote = 1;
+        float z = rsn - don->d50r;
         if (z <= 0.0f)
-            z = relbil_in_sigmas_(z, son->d10r);
+            z = relbil_in_sigmas_(z, don->d10r);
         else
-            z = relbil_in_sigmas_(z, son->d90r);
+            z = relbil_in_sigmas_(z, don->d90r);
         son->reliab[ifx] = 1.0f - fnorml(z);
     }
+}
 
+// The reading half: everything from the two gains on, which is every use of
+// the /DON/ triple.  `don` is the RESOLVED triple -- in the serial kernel that
+// is whatever `relbil_head` left plus the carry, and in the warp kernel it is
+// the warp scan's answer.  Returns 0, or 1 where Stage A raises IndexError on
+// an out-of-range NMODE (state left exactly where Stage A leaves it).
+__device__ inline int relbil_tail(const AllModeState* allm,
+                                  const AnoisState* anois, SonState* son,
+                                  const int* cant_iats, const float* cant_xfqs,
+                                  const float* cant_xfqe,
+                                  const float* cant_pwrdba, int numants,
+                                  int ifx, float freq, float rsn, int lufp,
+                                  const RelbilDon* don, int ir) {
+    int ilayer = allm->nmode[ir];
     son->gaint[ifx] = allm->tgain[ir];
     son->gainr[ifx] = allm->rgain[ir];
-    son->snrlw[ifx] = son->d10r;
-    son->snrup[ifx] = son->d90r;
+    son->snrlw[ifx] = don->d10r;
+    son->snrup[ifx] = don->d90r;
     son->angle[ifx] = allm->b[ir];
     son->vhigh[ifx] = allm->hp[ir];
     son->delay[ifx] = allm->timed[ir];
@@ -235,11 +273,40 @@ __device__ inline int relbil(AllModeState* allm, const AnoisState* anois,
     itm = (itm < 10) ? itm : 10;
     float tmx = div32(tme[itm - 1], tme[8]);
     if (lufp < 50)
-        son->snpr[ifx] = -(son->d50r + tmx * son->d90r) + rsn;
+        son->snpr[ifx] = -(don->d50r + tmx * don->d90r) + rsn;
     else
-        son->snpr[ifx] = -(son->d50r - tmx * son->d10r) + rsn;
+        son->snpr[ifx] = -(don->d50r - tmx * don->d10r) + rsn;
     son->snxx[ifx] = rsn - son->snpr[ifx];
     return 0;
+}
+
+// RELBIL as it always was: head, the triple written straight back into /SON/
+// (which is where the carry lives for the next frequency), then tail.
+//
+// allm: AllModeState (CREL/RELY/NREL written back); anois: AnoisState;
+// sigd: SigdState (DSLF/DSUF used as scratch); son: SonState, the output
+// column; the cant_* pointers are /cantenna/ + /pantenna/ for PWRDB.
+// ifx: frequency index; freq: MHz; rsn: required S/N; lufp: the required
+// reliability in percent.  Returns 0, or 1 where Stage A raises IndexError.
+__device__ inline int relbil(AllModeState* allm, const AnoisState* anois,
+                             SigdState* sigd, SonState* son,
+                             const int* cant_iats, const float* cant_xfqs,
+                             const float* cant_xfqe, const float* cant_pwrdba,
+                             int numants, int ifx, float freq, float rsn,
+                             int lufp) {
+    RelbilDon don;
+    don.d10r = son->d10r;
+    don.d50r = son->d50r;
+    don.d90r = son->d90r;
+    int ran = 0, wrote = 0, ir = 0;
+    relbil_head(allm, anois, sigd, son, ifx, rsn, &don, &ran, &wrote, &ir);
+    if (!ran)
+        return 0;                   // NMMOD <= 0: nothing happened at all
+    son->d10r = don.d10r;
+    son->d50r = don.d50r;
+    son->d90r = don.d90r;
+    return relbil_tail(allm, anois, son, cant_iats, cant_xfqs, cant_xfqe,
+                       cant_pwrdba, numants, ifx, freq, rsn, lufp, &don, ir);
 }
 
 #endif  // VOACAP_RELBIL_CUH

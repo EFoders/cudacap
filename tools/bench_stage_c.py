@@ -74,6 +74,30 @@ remaining ideas are real but none is cheap: split LUFFY into several kernels
 so each has a smaller live set and a shorter chain, or revisit the
 approximations in Tier 3 of the restructuring plan.  Converting the other
 fifteen structs to SoA is NOT indicated by the /RAYS/ result.
+
+WHAT *IS* A LEVER, AND ONLY BELOW FULL OCCUPANCY: ``--warp``
+------------------------------------------------------------
+``cuda/luffy_warp.cuh`` shortens the chain itself -- one WARP per
+circuit-hour, lane L on frequency L+1, so the twelve DO-265 trips run side by
+side over one ionosphere and one reflectrix.  It is bit-identical to
+``luffy_batch`` on all 504 replay circuit-hours, every field of every struct
+(``tests/stage_c/test_luffy_warp.py``).  ``--warp`` A/Bs the two, kernel
+only.  Measured at 4 warps/block:
+
+    circuit-hours     504    2,016    4,032    8,064   32,256
+    thread  us/eval  12.87    3.52     1.89     1.01     0.40
+    warp    us/eval   2.22    1.34     1.16     1.04     0.98
+    speedup          5.81x   2.63x    1.63x    0.97x    0.42x
+
+The setup phase (SELMOD, ANOIS1, the ionosphere build, SETLNG, SIGDIS) does
+not parallelise and is 11-12% of the kernel -- measured by giving the kernel
+a runtime DO-265 trip count, so the register allocation is held identical --
+which caps the design at 5.2-5.4x.  It reaches 5.8x on the empty machine and
+loses on the full one, and both are the same fact: the thread kernel hides
+its latency with thousands of INDEPENDENT circuit-hours, and when there are
+enough of those it does not need a shorter chain, while the warp kernel has
+given up 20 of every 32 lanes and 254 registers against 168 to get one.  The
+crossover is around 8,000 circuit-hours.  Neither kernel replaces the other.
 """
 
 import argparse
@@ -116,6 +140,21 @@ def _time(fn, reps):
     return (time.perf_counter() - t0) / reps
 
 
+def _time_warp(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps, wpb):
+    """Kernel-only seconds for ``luffy_batch_warp`` — one WARP per
+    circuit-hour, lane L on frequency L+1 (cuda/luffy_warp.cuh)."""
+    import cupy as cp
+
+    from voacap_gpu.stage_c.driver import stage_luffy
+
+    run, state = stage_luffy(bufs, rays, ipflags, iono, iono_idx, ant,
+                             ant_idx, warp=True, warps_per_block=wpb)
+    t = _time(run, reps)
+    del run, state
+    cp.get_default_memory_pool().free_all_blocks()
+    return t
+
+
 def _time_kernel(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps,
                  block):
     """(kernel seconds, round-trip seconds) for one batch.
@@ -142,12 +181,62 @@ def _time_kernel(bufs, rays, ipflags, iono, iono_idx, ant, ant_idx, reps,
     return kern, trip
 
 
+def _warp_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
+             n0, nfreq):
+    """The A/B: thread-per-circuit-hour vs warp-per-circuit-hour, kernel-only.
+
+    Both columns time the SAME staged batch with the state already resident,
+    so the difference is the kernel and nothing else.  The two are bit-
+    identical on all 504 replay circuit-hours
+    (``tests/stage_c/test_luffy_warp.py``), so this is a like-for-like
+    comparison of two ways of computing the same numbers.
+    """
+    import cupy as cp
+
+    from voacap_gpu.stage_c.driver import STATE_BYTES_PER_THREAD
+
+    print(f"{'circ-hours':>11} {'thread ms':>10} {'us/eval':>9} "
+          f"| {'warp ms':>9} {'us/eval':>9} | {'speedup':>8} "
+          f"{'vs 1 core':>10}")
+    print("-" * 74)
+    for n in args.sizes:
+        reps = max(1, n0 * args.reps // max(n, 1)) if n > 20000 else args.reps
+        idx = np.arange(n) % n0
+        bufs, rays = base[idx], base_rays[idx]
+        ipf, ii, ai = base_ipf[idx], base_ii[idx], base_ai[idx]
+        if n * STATE_BYTES_PER_THREAD / 1e9 > 9.0:
+            print(f"{n:>11,}  skipped -- state exceeds the budget")
+            continue
+        try:
+            kern, _ = _time_kernel(bufs, rays, ipf, iono, ii, ant, ai, reps,
+                                   args.block)
+            cp.get_default_memory_pool().free_all_blocks()
+            wk = _time_warp(bufs, rays, ipf, iono, ii, ant, ai, reps,
+                            args.wpb)
+        except Exception as exc:
+            print(f"{n:>11,}  failed: {type(exc).__name__}: {exc}")
+            continue
+        ke = kern * 1e6 / n / nfreq
+        we = wk * 1e6 / n / nfreq
+        print(f"{n:>11,} {kern * 1e3:>10.2f} {ke:>9.3f} "
+              f"| {wk * 1e3:>9.2f} {we:>9.3f} | {kern / wk:>7.2f}x "
+              f"{FORTRAN_US_PER_EVAL / we:>9.1f}x")
+    print(f"\n{args.wpb} warps/block.  KERNEL-only, batch already resident.")
+    print(f"Fortran baseline {FORTRAN_US_PER_EVAL:.1f} us per "
+          "(circuit, hour, frequency), measured, ONE core.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sizes", type=int, nargs="+",
                     default=[504, 2016, 8064, 32256, 129024])
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--block", type=int, default=32)
+    ap.add_argument("--warp", action="store_true",
+                    help="A/B the warp-per-circuit-hour kernel against the "
+                         "thread-per-circuit-hour one, kernel-only")
+    ap.add_argument("--wpb", type=int, default=4,
+                    help="warps per block for the warp kernel")
     args = ap.parse_args()
 
     from voacap_gpu.stage_c.driver import (CIRCUIT_DTYPE,
@@ -179,6 +268,11 @@ def main():
     nfreq = float((frel[:, 1:13] > 0.0).sum(axis=1).mean())
     print(f"live frequency slots per circuit-hour: {nfreq:.1f} "
           f"(the Fortran baseline circuit runs 28)\n")
+
+    if args.warp:
+        _warp_ab(args, base, base_rays, base_ipf, base_ii, base_ai, iono, ant,
+                 n0, nfreq)
+        return
 
     print(f"{'threads':>9} {'kernel ms':>10} {'us/eval':>9} {'vs 1 core':>10} "
           f"| {'trip ms':>9} {'us/eval':>9} {'vs 1 core':>10} {'state GB':>9}")

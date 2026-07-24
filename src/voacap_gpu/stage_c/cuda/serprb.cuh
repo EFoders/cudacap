@@ -31,9 +31,14 @@ __device__ __constant__ float SERPRB_TME[10] = {
 // (ADS/SUS/SLS in, SPR out); son: SonState (SPROB + the /DON/ D10S/D50S/D90S
 // triple out).  ifx: frequency index; rsn: required S/N; lufp: required
 // reliability, percent.  Assumes allm->nmmod >= 1 (Stage A raises otherwise).
-__device__ inline void serprb(AllModeState* allm, const AnoisState* anois,
-                              TonState* ton, SonState* son, int ifx,
-                              float rsn, int lufp) {
+// D10S/D50S/D90S are /SON/ SCALARS, not per-frequency columns, so the
+// warp-per-circuit-hour kernel (cuda/luffy_warp.cuh) cannot let twelve lanes
+// write them concurrently.  This variant takes them as out-pointers; `serprb`
+// below is the original, aimed straight at /SON/.  Nothing else differs.
+__device__ inline void serprb_ex(AllModeState* allm, const AnoisState* anois,
+                                 TonState* ton, SonState* son, int ifx,
+                                 float rsn, int lufp, float* d10s_out,
+                                 float* d50s_out, float* d90s_out) {
     ton->spr = 0.0f;
     int itm = abs(lufp - 50) / 5 + 1;
     itm = (itm < 10) ? itm : 10;                        // min(itm, 10)
@@ -82,9 +87,16 @@ __device__ inline void serprb(AllModeState* allm, const AnoisState* anois,
             imax = i;
     }
     son->sprob[ifx] = allm->spro[imax];
-    son->d10s = d10sa[imax];
-    son->d50s = d50sa[imax];
-    son->d90s = son->d10s;                              // not a separate decile
+    *d10s_out = d10sa[imax];
+    *d50s_out = d50sa[imax];
+    *d90s_out = *d10s_out;                              // not a separate decile
+}
+
+__device__ inline void serprb(AllModeState* allm, const AnoisState* anois,
+                              TonState* ton, SonState* son, int ifx,
+                              float rsn, int lufp) {
+    serprb_ex(allm, anois, ton, son, ifx, rsn, lufp, &son->d10s, &son->d50s,
+              &son->d90s);
 }
 
 #endif  // VOACAP_SERPRB_CUH

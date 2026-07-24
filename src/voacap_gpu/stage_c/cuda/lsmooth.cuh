@@ -108,43 +108,54 @@ __device__ inline void smoothstore_init(SmoothStore* s) {
 
 // Stash this frequency's answer for the pass that just ran (lines 330-369).
 // Called once per frequency per pass, only under MSPEC 121.
-__device__ inline int save_pass(const CircuitState* c, SmoothStore* s,
-                                int ifx, int ipflag) {
+// The part-wise form.  /allMODE/ and /ANOIS/ are PER-LANE in the
+// warp-per-circuit-hour kernel (cuda/luffy_warp.cuh) while /SON/ stays shared,
+// so they cannot all be reached through one CircuitState there.  `save_pass`
+// below is the original call, and passes the circuit's own three.
+__device__ inline int save_pass_parts(const SonState* son,
+                                      const AllModeState* allm,
+                                      const AnoisState* anois, SmoothStore* s,
+                                      int ifx, int ipflag) {
     int idx = (ipflag + 1) / 100;               // 100 -> 1, 200 -> 2
     if (idx < 0 || idx >= VC_SMOOTH_NPASS)
         return VC_SMOOTH_BAD_IDX;               // numpy would raise IndexError
     int p = ifx * VC_SMOOTH_NPASS + idx;
-    s->angle[p]  = c->son.angle[ifx];
-    s->cprob[p]  = c->son.cprob[ifx];
-    s->dblos[p]  = c->son.dblos[ifx];
-    s->dblosl[p] = c->son.dblosl[ifx];
-    s->dblosu[p] = c->son.dblosu[ifx];
-    s->delay[p]  = c->son.delay[ifx];
-    s->dbw[p]    = c->son.dbw[ifx];
-    s->vhigh[p]  = c->son.vhigh[ifx];
-    s->dbu[p]    = c->son.dbu[ifx];
-    s->reliab[p] = c->son.reliab[ifx];
-    s->sndb[p]   = c->son.sndb[ifx];
-    s->snpr[p]   = c->son.snpr[ifx];
-    s->snrlw[p]  = c->son.snrlw[ifx];
-    s->snrup[p]  = c->son.snrup[ifx];
-    s->sprob[p]  = c->son.sprob[ifx];
-    s->probmp[p] = c->son.probmp[ifx];
-    s->nhp[p]    = c->son.nhp[ifx];
-    s->smode[p]  = c->son.mode[ifx];
+    s->angle[p]  = son->angle[ifx];
+    s->cprob[p]  = son->cprob[ifx];
+    s->dblos[p]  = son->dblos[ifx];
+    s->dblosl[p] = son->dblosl[ifx];
+    s->dblosu[p] = son->dblosu[ifx];
+    s->delay[p]  = son->delay[ifx];
+    s->dbw[p]    = son->dbw[ifx];
+    s->vhigh[p]  = son->vhigh[ifx];
+    s->dbu[p]    = son->dbu[ifx];
+    s->reliab[p] = son->reliab[ifx];
+    s->sndb[p]   = son->sndb[ifx];
+    s->snpr[p]   = son->snpr[ifx];
+    s->snrlw[p]  = son->snrlw[ifx];
+    s->snrup[p]  = son->snrup[ifx];
+    s->sprob[p]  = son->sprob[ifx];
+    s->probmp[p] = son->probmp[ifx];
+    s->nhp[p]    = son->nhp[ifx];
+    s->smode[p]  = son->mode[ifx];
     // NB slot 1 of /allMODE/, not slot IFX: these are the CHOSEN mode's gains.
-    s->tgain[p]  = c->allm.tgain[1];
-    s->rgain[p]  = c->allm.rgain[1];
+    s->tgain[p]  = allm->tgain[1];
+    s->rgain[p]  = allm->rgain[1];
 
     if (ipflag == 200) {
         // .....SAVE LONG PATH PARAMETERS
-        s->zdu[ifx]     = c->anois.du;
-        s->zdl[ifx]     = c->anois.dl;
-        s->inmode[ifx]  = c->allm.nmode[1];
-        s->zangler[ifx] = c->son.angler[ifx];
-        s->zmoder[ifx]  = c->son.moder[ifx];
+        s->zdu[ifx]     = anois->du;
+        s->zdl[ifx]     = anois->dl;
+        s->inmode[ifx]  = allm->nmode[1];
+        s->zangler[ifx] = son->angler[ifx];
+        s->zmoder[ifx]  = son->moder[ifx];
     }
     return 0;
+}
+
+__device__ inline int save_pass(const CircuitState* c, SmoothStore* s,
+                                int ifx, int ipflag) {
+    return save_pass_parts(&c->son, &c->allm, &c->anois, s, ifx, ipflag);
 }
 
 // Interpolate the two models on power and redo the physics from there.

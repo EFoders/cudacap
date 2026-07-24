@@ -265,6 +265,7 @@ def shared_antenna_tables(cants):
 
 _KERNEL_SRC = r'''
 #include "luffy.cuh"
+#include "luffy_warp.cuh"
 
 extern "C" __global__ void luffy_batch(
         CircuitState* circ,
@@ -286,6 +287,40 @@ extern "C" __global__ void luffy_batch(
                       sys, perr, f2d111, ant_array, ant_aeff, ant_iats,
                       ant_xfqs, ant_xfqe, ant_offazim, ant_pwrdba, numants,
                       iono_idx[i], ant_idx[i], ipflag[i]);
+}
+
+// ONE WARP PER CIRCUIT-HOUR, ONE LANE PER FREQUENCY (cuda/luffy_warp.cuh).
+// blockDim.x must be 32 * warps_per_block, and the dynamic shared memory
+// warps_per_block * sizeof(SmoothStore) -- one LUFFY "TEMPORARY STORAGE" per
+// warp, because the twelve lanes fill disjoint rows of it and lane 0 reads
+// the whole thing back in the blend.
+extern "C" __global__ void luffy_batch_warp(
+        CircuitState* circ,
+        int* rays_nang, float* rays_ang, int* rays_ifob,
+        const int* ipflag,
+        const int* iono_idx, const int* ant_idx,
+        const float* fam, const float* dud, const float* fakp,
+        const float* fakmap, const float* hmym, const float* fakabp,
+        const float* abmap, const float* sys, const float* perr,
+        const float* f2d111,
+        const float* ant_array, const float* ant_aeff, const int* ant_iats,
+        const float* ant_xfqs, const float* ant_xfqe,
+        const float* ant_offazim, const float* ant_pwrdba, int numants,
+        int* status, int n) {
+    extern __shared__ SmoothStore warp_store[];
+    int lane = threadIdx.x & 31;
+    int wib = threadIdx.x >> 5;                 // warp index in the block
+    int i = blockIdx.x * (blockDim.x >> 5) + wib;
+    if (i >= n) return;
+    LaneState L;
+    int st = luffy_warp(&circ[i], rays_nang, rays_ang, rays_ifob, n, i,
+                        &L, &warp_store[wib], lane,
+                        fam, dud, fakp, fakmap, hmym, fakabp, abmap,
+                        sys, perr, f2d111, ant_array, ant_aeff, ant_iats,
+                        ant_xfqs, ant_xfqe, ant_offazim, ant_pwrdba, numants,
+                        iono_idx[i], ant_idx[i], ipflag[i]);
+    if (lane == 0)
+        status[i] = st;
 }
 
 extern "C" __global__ void circuit_sizeof(int* out) {
@@ -350,14 +385,37 @@ def _rays_views(d_soa):
     return d_nang, d_ang, d_ifob
 
 
+def smoothstore_sizeof() -> int:
+    """sizeof(SmoothStore) — the per-warp dynamic shared memory the warp
+    kernel needs (LUFFY's "TEMPORARY STORAGE", cuda/lsmooth.cuh)."""
+    import cupy as cp
+    out = cp.zeros(1, np.int32)
+    load(_KERNEL_SRC + r'''
+extern "C" __global__ void smoothstore_size(int* o) {
+    o[0] = (int)sizeof(SmoothStore);
+}
+''').get_function("smoothstore_size")((1,), (1,), (out,))
+    cp.cuda.runtime.deviceSynchronize()
+    return int(cp.asnumpy(out)[0])
+
+
+# cuda/lsmooth.cuh: 20 (NFREQ+2, 3) columns + 5 (NFREQ+2,) extras, 4 bytes each
+SMOOTHSTORE_BYTES = (20 * 14 * 3 + 5 * 14) * 4
+
+
 def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
-                block=32):
+                block=32, warp=False, warps_per_block=4):
     """Move one batch to the device; return the staged launch, not the result.
 
     Split out of ``launch_luffy`` so a benchmark can time the KERNEL without
     the bus.  That distinction turned out to matter a great deal: at 32k
     threads the whole ``launch_luffy`` takes ~600 ms of which the kernel is
     ~125 ms, so timing the round trip measures PCIe, not compute.
+
+    ``warp`` selects ``luffy_batch_warp`` (cuda/luffy_warp.cuh) — one WARP per
+    circuit-hour, lane L on frequency L+1 — instead of the one-thread-per-
+    circuit-hour ``luffy_batch``.  The two are bit-identical; see
+    ``tests/stage_c/test_luffy_warp.py``.
 
     Returns ``(run, state)`` — call ``run()`` to launch (as many times as you
     like; the kernel mutates the staged state in place), and pass ``state`` to
@@ -381,8 +439,6 @@ def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     d_ai = cp.asarray(np.ascontiguousarray(ant_idx, I32))
     d_status = cp.full(n, -1, np.int32)
 
-    fn = load_kernel().get_function("luffy_batch")
-    grid = ((n + block - 1) // block,)
     args = (d_circ, d_nang, d_ang, d_ifob, d_ipflag, d_ii, d_ai,
             d["fam"], d["dud"], d["fakp"], d["fakmap"], d["hmym"],
             d["fakabp"], d["abmap"], d["sys"], d["perr"], d["f2d111"],
@@ -390,8 +446,21 @@ def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
             a["offazim"], a["pwrdba"], np.int32(ant["numants"]), d_status,
             np.int32(n))
 
-    def run():
-        fn(grid, (block,), args)
+    if warp:
+        fn = load_kernel().get_function("luffy_batch_warp")
+        wpb = int(warps_per_block)
+        grid = ((n + wpb - 1) // wpb,)
+        blk = (32 * wpb,)
+        shared = wpb * SMOOTHSTORE_BYTES
+
+        def run():
+            fn(grid, blk, args, shared_mem=shared)
+    else:
+        fn = load_kernel().get_function("luffy_batch")
+        grid = ((n + block - 1) // block,)
+
+        def run():
+            fn(grid, (block,), args)
 
     return run, (d_circ, d_soa, d_status, n)
 
@@ -408,7 +477,7 @@ def fetch_luffy(state):
 
 
 def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
-                 block=32):
+                 block=32, warp=False, warps_per_block=4):
     """Run N packed circuit-hours, one thread each.
 
     bufs:      (N,) array of CIRCUIT_DTYPE — the ENTRY states, not mutated
@@ -424,7 +493,8 @@ def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     reported).
     """
     run, state = stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant,
-                             ant_idx, block=block)
+                             ant_idx, block=block, warp=warp,
+                             warps_per_block=warps_per_block)
     run()
     return fetch_luffy(state)
 
