@@ -1,4 +1,4 @@
-# voacap-gpu
+# CUDACAP (voacap-gpu)
 
 A GPU rewrite of **VOACAP** (Voice of America Coverage Analysis Program) HF ionospheric propagation prediction, validated bit-for-bit against the original Fortran. One CUDA thread runs one whole circuit-hour, so tens of thousands of circuits compute concurrently on a single GPU. The theoretical increase in performance is much higher than what we have achieved today, due to the nature of how IONCAP was written originally in Fortran. Some effort has been put in to restructure the engine without impacting correctness. 
 
