@@ -3,10 +3,12 @@
 A GPU rewrite of **VOACAP** (Voice of America Coverage Analysis Program) HF
 ionospheric propagation prediction, validated bit-for-bit against the original
 Fortran. One CUDA thread runs one whole circuit-hour, so tens of thousands of
-circuits compute concurrently on a single GPU.
+circuits compute concurrently on a single GPU. The theoretical increase in performance  
+is much higher than what we have achieved today, due to the nature of how IONCAP was 
+written originally in Fortran. Some effort has been put in to restructure the engine without
+impacting correctness. 
 
-**Status: engine complete and validated.** The point-to-point prediction
-engine is ported end to end and runs on the GPU. On an RTX 5080 it computes a
+The point-to-point prediction engine is ported end to end and runs on the GPU. On an RTX 5080 it computes a
 world-scale batch **~15× faster than the original Fortran across all 32 cores**
 of this machine (and bit-exact against a single-core run when fast-math is
 off). See the two architecture documents:
@@ -97,13 +99,9 @@ reproduce with `uv run python tools/real_world_compare.py`.
 
 ## Requirements
 
-- Python via `uv` (there is no bare `python` on the dev machine — use
-  `uv run python` / `uv run pytest`).
+- Python via `uv`.
 - An NVIDIA GPU. The CUDA path compiles device code at runtime through NVRTC,
-  shipped in the `cupy-cuda12x[ctk]` wheels — **no CUDA Toolkit or MSVC install
-  is required.**
-- WSL + gfortran only if you want to rebuild the oracle:
-  `wsl bash tools/oracle/build_oracle.sh`.
+  shipped in the `cupy-cuda12x[ctk]` wheels.
 
 ## Testing
 
@@ -114,7 +112,4 @@ circuit-hours through the GPU kernel and asserts **all 7,012,152 output cells
 are bit-identical to the scalar reference.**
 
 ## License
-
-No license has been chosen yet — all rights reserved for now. The vendored
-reference code retains its own notices: original VOACAP is a US Government
-(NTIA/ITS) public-domain work; the voacapl port modifications are CC0.
+original VOACAP is a US Government (NTIA/ITS) public-domain work.
