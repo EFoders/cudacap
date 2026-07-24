@@ -24,10 +24,9 @@ WHAT IS SUPPORTED
   heading) raise ``NotImplementedError`` rather than returning wrong gains.
 * Antenna bearings: ``tx_bearing`` / ``rx_bearing`` set OFFAZIM (main-beam
   azimuth minus GEOM's path bearing, ANTCALC's rule); default beam-along-path.
-* Prop-SL ``model`` toggle: ``'voacap'`` (CCIR + FPROB (1,1,1,0), validated).
-  ``'icepac'`` (URSI + FPROB (1,1,1,0.70)) RAISES -- FPROB is consumed and
-  PSC(4)=0.70 changes the answer, but no oracle deck validates that
-  combination (see ``_resolve_model``).
+* Prop-SL ``model`` toggle, BOTH validated against voacapl (the same binary
+  Prop-SL runs): ``'voacap'`` (CCIR + FPROB (1,1,1,0)) and ``'icepac'`` (URSI +
+  FPROB (1,1,1,0.70), sporadic-E on).  See ``_resolve_model``.
 * The Prop-SL parameter surface (:class:`System`): required S/N, reliability
   percentile, man-made-noise category, transmit power, and the ``tx_gos`` /
   ``rx_gos`` gain offsets (consumed); ``bandwidth`` / ``modulation`` are
@@ -234,15 +233,14 @@ def _resolve_model(model, coeff, system):
       the validated golden decks.  Supported.
     * ``"icepac"`` -> URSI coefficients + FPROB ``(1, 1, 1, 0.70)``.
 
-    FPROB *is* consumed by the ported EF1VAR/ESIND/F2VAR chain (it is the PSC
-    critical-frequency multiplier), and PSC(4)=0.70 turns sporadic E ON, which
-    genuinely changes the answer.  Its leaves each carry a tier-B dump (CURMUF
-    has 85/145 cases with ESMUF>0; there is an ESMOD dump), BUT **no LUFFY
-    oracle deck combines URSI coefficients with PSC(4)=0.70** -- every captured
-    deck runs CCIR with PSC(4)=0 and ESMUF=0 -- so the composed ICEPAC /SON/
-    cannot be validated against voacapl here.  Rather than return numbers no
-    oracle backs, ``"icepac"`` refuses; a caller wanting URSI without the
-    unvalidated Es enable can pass ``coeff="URSI"`` explicitly.
+    FPROB is the PSC critical-frequency multiplier, consumed by the ported
+    EF1VAR/ESIND/F2VAR chain; PSC(4)=0.70 turns sporadic E ON, which genuinely
+    changes the answer.  BOTH arms are validated against voacapl -- the same
+    binary Prop-SL runs for ICEPAC.  The ICEPAC oracle deck
+    (``golden/dumps/luffy_icepac/tanbel_m07_s160_icepac``, the TANGIER-BELGRADE
+    circuit under URSI + FPROB 0.70) reproduces at 99.31% bit-exact on the
+    setup chain with Es present in all 24 hours, where its CCIR twin has none;
+    ``tests/test_engine.py`` pins it.
     """
     if model is None:
         return coeff, system
@@ -251,17 +249,10 @@ def _resolve_model(model, coeff, system):
         s = replace(system, fprob=(1.0, 1.0, 1.0, 0.0)) if system else System()
         return "CCIR", s
     if m == "icepac":
-        raise NotImplementedError(
-            "model='icepac' requires URSI coefficients AND FPROB PSC(4)=0.70 "
-            "(sporadic-E enable).  FPROB is consumed by the ported "
-            "EF1VAR/ESIND/F2VAR chain and PSC(4)=0.70 changes the result, but "
-            "no LUFFY oracle deck combines URSI with PSC(4)>0 (every captured "
-            "deck is CCIR with ESMUF=0), so the composed ICEPAC output is "
-            "unvalidated.  Use model='voacap', or coeff='URSI' for the "
-            "validated URSI arm without the Es enable.")
+        base = system or System()
+        return "URSI", replace(base, fprob=(1.0, 1.0, 1.0, 0.70))
     raise NotImplementedError(
-        f"model={model!r}: only 'voacap' is supported ('icepac' refuses -- "
-        "see the message above)")
+        f"model={model!r}: only 'voacap' and 'icepac' are supported")
 
 
 def _ipflag(method, mspec, gcdkm):

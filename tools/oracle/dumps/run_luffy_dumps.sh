@@ -77,7 +77,12 @@ SHIM=${SHIM/ -o voacapl / -o $WORK/voacapl_shim }
 eval "$SHIM"
 cd "$WORK"
 
-DEST="$REPO_ROOT/golden/dumps/luffy"
+# DEST defaults to the main replay dir, but an ICEPAC (or any other isolated)
+# capture can redirect it with LUFFY_DEST so it does NOT clear or overwrite the
+# committed 21-deck replay set.  e.g.
+#   LUFFY_DEST=golden/dumps/luffy_icepac wsl bash ... tanbel_m07_s160_icepac
+DEST="${LUFFY_DEST:+$REPO_ROOT/$LUFFY_DEST}"
+DEST="${DEST:-$REPO_ROOT/golden/dumps/luffy}"
 # Clear the CSVs but not the directory: OneDrive-backed paths refuse rmdir
 # from WSL even where file deletion is allowed.
 mkdir -p "$DEST"; rm -f "$DEST"/*.csv

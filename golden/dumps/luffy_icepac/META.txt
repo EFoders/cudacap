@@ -1,0 +1,17 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero -I ../modules/ -g -O2 -std=legacy -fallow-argument-mismatch     (taken from the real voacapl link line)
+method: LUFFY shimmed into the real voacapl (dump_luffy.f provides
+        LUFFY, the real one is relinked as LUFFYR).  Everything else
+        -- DECRED, REDMAP, GEOM, SANG, CURMUF, the hour loop -- is
+        the stock program, so the captured state is what a real deck
+        produces rather than what a case generator imagines.
+decks: tanbel_m07_s160_icepac
+files: <deck>_in.csv  = LUFFY's entry state, one row per call
+       <deck>_out.csv = /SON/ + XLUF + JMODE at exit, same rows
+       <deck>_ant.csv = /cantenna/ + /pantenna/, one row per antenna
+                        and frequency; captured because OFFAZIM comes
+                        from ANTCALC, not from the antenna file.
+NOT captured: the coefficient maps (loaded
+  Python-side by REDMAP, already validated), and /SON/
+  MODE and MDL, which are CHARACTER and feed only the output tables.
+generated: 2026-07-24T12:36:27Z
