@@ -748,7 +748,7 @@ wheels = [
 
 [[package]]
 name = "voacap-gpu"
-version = "0.0.1"
+version = "0.0.4"
 source = { editable = "." }
 dependencies = [
     { name = "cupy-cuda12x", extra = ["ctk"] },

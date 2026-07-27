@@ -15,13 +15,15 @@ WHAT IS SUPPORTED
   (all-modes, short path forced).  These are the three regimes the LUFFY
   replay validates.  Any other METHOD raises ``NotImplementedError``.
 * Up to 11 frequencies per call (the FREL card's capacity).
-* Antennas: an isotropic 0 dBi pattern (the default), or a vendored *type 14*
-  ``.VOA`` sample file (30 frequencies x 91 elevations) read through
-  ``scalar/readant.py`` and installed exactly as READANT + ANTCALC would leave
-  it.  A type-14 pattern is azimuth-independent, so the beam is taken as
-  pointing along the great-circle path (OFFAZIM 0).  Antenna types 1-10, 12
-  (method-of-moments synthesis) and 13 (azimuth-dependent, needs a real beam
-  heading) raise ``NotImplementedError`` rather than returning wrong gains.
+* Antennas, independently per end: an isotropic 0 dBi pattern (the default),
+  a *type 14* ``.VOA`` table (30 frequencies x 91 elevations), or a *type 13*
+  ``.VOA`` table (360 azimuths x 91 elevations at one design frequency) --
+  each read through ``scalar/readant.py`` and installed exactly as READANT +
+  ANTCALC would leave it.  Type 13 is azimuth-dependent: ANTCALC resolves
+  OFFAZIM (DAZEL0 path azimuth minus the beam heading) at setup and installs
+  the interpolated azimuth slice, so the /cantenna/ is per-circuit (see
+  :func:`antcalc_cant`).  Types 1-12 (method-of-moments synthesis) raise
+  ``NotImplementedError`` rather than returning wrong gains.
 * Antenna bearings: ``tx_bearing`` / ``rx_bearing`` set OFFAZIM (main-beam
   azimuth minus GEOM's path bearing, ANTCALC's rule); default beam-along-path.
 * Prop-SL ``model`` toggle, BOTH validated against voacapl (the same binary
@@ -62,6 +64,7 @@ from voacap_gpu.scalar import constants as _K
 from voacap_gpu.scalar.antennastate import CantennaState
 from voacap_gpu.scalar.circuit import Circuit
 from voacap_gpu.scalar.curmuf import curmuf
+from voacap_gpu.scalar.dazel import dazel0
 from voacap_gpu.scalar.esind import esind
 from voacap_gpu.scalar.f2var import f2var
 from voacap_gpu.scalar.f32math import F32
@@ -199,7 +202,8 @@ def cant_from_files(tx_path, rx_path, power_kw=1.0, tx_gos=0.0, rx_gos=0.0,
     Installed exactly as READANT + ANTCALC would (``CantennaState.load_p2p``).
     A type-14 pattern is azimuth-independent, so OFFAZIM does not change the
     gain -- ``off_tx`` / ``off_rx`` are recorded for provenance.  Raises for
-    non-tabulated types.
+    non-tabulated types.  For azimuth-dependent (type 13) patterns use
+    :func:`antcalc_cant`, which needs the circuit geometry.
     """
     cant = CantennaState()
     for iat, itr, path in ((1, 1, tx_path), (2, 2, rx_path)):
@@ -212,6 +216,75 @@ def cant_from_files(tx_path, rx_path, power_kw=1.0, tx_gos=0.0, rx_gos=0.0,
                 f"antenna file {path!r} is type {ant.jant}; only type 14 "
                 "(30 freq x 91 elevation) point-to-point tables are supported")
         cant.load_p2p(iat, ant, itr)
+    return _finish_cant(cant, power_kw, tx_gos, rx_gos, off_tx, off_rx)
+
+
+def _antcalc_offazim(ztaz, beam_bearing):
+    """ANTCALC's off-azimuth (antcalc.for:271-272, 336-337), REAL*4.
+
+    The single +360 wrap matches the Fortran; the >=360 wrap does not exist
+    there, but DAZEL0 can return exactly 360.0 (360 - atan2 of 0) and a
+    tiny-negative difference rounds up to 360.0 in REAL*4 -- both circularly
+    identical to 0, where the Fortran would read past its azimuth table.
+    """
+    if beam_bearing is None:
+        return F32(0.0)                     # beam along the path
+    off = F32(F32(ztaz) - F32(beam_bearing))
+    if off < 0.0:
+        off = F32(off + F32(360.0))
+    if off >= F32(360.0):
+        off = F32(off - F32(360.0))
+    return off
+
+
+def antcalc_cant(tx_ant, rx_ant, tx, rx, *, power_kw=1.0, tx_gos=0.0,
+                 rx_gos=0.0, tx_bearing=None, rx_bearing=None,
+                 long_path=False) -> CantennaState:
+    """ANTCALC for one circuit: a /cantenna/ from parsed antenna files.
+
+    The per-CIRCUIT half of antcalc.for's point-to-point path (lines
+    106-118 for the azimuths, 246-337 for the tables): compute the path
+    azimuth at each end with DAZEL0 (long path flips it 180 degrees,
+    antcalc.for:110-115), derive OFFAZIM from the main-beam heading, and
+    install each end's pattern:
+
+    * ``None``          -- 0 dBi isotropic entry (as :func:`isotropic_cant`),
+    * type 14 ``.VOA``  -- the azimuth-independent table (load_p2p),
+    * type 13 ``.VOA``  -- the azimuth slice at OFFAZIM (load_p2p_t13); this
+      is the arm that makes the result GEOMETRY-DEPENDENT: a new tx/rx pair
+      needs a new cant, exactly as voacapl reruns ANTCALC per CIRCUIT card.
+
+    ``tx_ant`` / ``rx_ant`` are parsed :class:`AntennaFile` objects (see
+    ``scalar.readant``) or None; ``tx`` / ``rx`` are (lat, lon) degrees.
+    Other tabulated/synthesised types raise ``NotImplementedError``.
+    """
+    ztaz_t, _ = dazel0(tx[0], tx[1], rx[0], rx[1])
+    ztaz_r, _ = dazel0(rx[0], rx[1], tx[0], tx[1])
+    if long_path:                           # antcalc.for:110-115
+        ztaz_t = F32(ztaz_t + F32(180.0))
+        if ztaz_t >= 360.0:
+            ztaz_t = F32(ztaz_t - F32(360.0))
+        ztaz_r = F32(ztaz_r + F32(180.0))
+        if ztaz_r >= 360.0:
+            ztaz_r = F32(ztaz_r - F32(360.0))
+    off_tx = _antcalc_offazim(ztaz_t, tx_bearing)
+    off_rx = _antcalc_offazim(ztaz_r, rx_bearing)
+
+    cant = CantennaState()
+    for iat, itr, ant, off in ((1, 1, tx_ant, off_tx), (2, 2, rx_ant, off_rx)):
+        if ant is None:
+            cant.iats[iat] = itr
+            cant.xfqs[iat] = F32(0.0)
+            cant.xfqe[iat] = F32(30.0)
+            cant.numants = max(cant.numants, iat)
+        elif ant.jant == 14:
+            cant.load_p2p(iat, ant, itr)
+        elif ant.jant == 13:
+            cant.load_p2p_t13(iat, ant, itr, off)
+        else:
+            raise NotImplementedError(
+                f"antenna type {ant.jant} is not ported; isotropic, type 13 "
+                "and type 14 are supported")
     return _finish_cant(cant, power_kw, tx_gos, rx_gos, off_tx, off_rx)
 
 
@@ -398,6 +471,58 @@ def build_circuit(tx, rx, month, ssn, hour, freqs, *, method=30,
 
 
 # ---------------------------------------------------------------------------
+# The device-setup path: the same inputs, none of the host work
+# ---------------------------------------------------------------------------
+
+def setup_config(system=None, *, method=30, freqs=(), pole=POLE_DEFAULT,
+                 info=0):
+    """A ``SETUP_CONFIG_DTYPE`` row: everything :func:`build_circuit` copies
+    into a Circuit that does NOT vary per circuit-hour.
+
+    The device setup kernel (``cuda/kernels/setup.cuh``) takes one of these per
+    distinct SYSTEM card and 32 bytes per circuit-hour; between them they are
+    exactly ``build_circuit``'s inputs.  This function and ``build_circuit``
+    must agree field for field -- ``tests/cuda/test_setup_batch.py`` is what
+    holds them to it -- so anything added to one belongs in the other.
+    """
+    from voacap_gpu.cuda.driver import SETUP_CONFIG_DTYPE
+
+    system = system or System()
+    psc, amind = system._psc()
+    imeth, mspec = _resolve_method(method)
+    freqs = [F32(f) for f in freqs]
+    if not 1 <= len(freqs) <= 11:
+        raise NotImplementedError(
+            f"{len(freqs)} frequencies: 1..11 are supported per call")
+
+    cfg = np.zeros((), SETUP_CONFIG_DTYPE)
+    cfg["pole_lat"] = F32(pole[0])
+    cfg["pole_lon"] = F32(pole[1])
+    cfg["amind"] = amind
+    cfg["rsn"] = F32(system.required_snr)
+    # NOT a typo, and not swapped: build_circuit assigns DMP from
+    # max_spread_db and PMP from max_delay_ms.  The Fortran names read the
+    # other way round; the assignment is what matters and this mirrors it.
+    cfg["dmp"] = F32(system.max_spread_db)
+    cfg["pmp"] = F32(system.max_delay_ms)
+    cfg["psc"] = psc
+    cfg["lufp"] = int(system.required_reliability)
+    cfg["method"] = imeth
+    cfg["noise"] = int(system.man_made_noise)
+    cfg["mspec"] = mspec
+    cfg["nyear_is_2089"] = 0            # Circuit's default NYEAR is ""
+    cfg["want_service_prob"] = int(imeth in (20, 25, 30))
+    cfg["info"] = int(info)
+    cfg["itim"] = 1                     # hours are UTC; see setup.cuh on ITIM
+    frel = np.zeros(30, np.float32)
+    for i, f in enumerate(freqs, start=1):
+        frel[i] = f
+    frel[14] = F32(1.0)                 # DECRED's IFREQ flag
+    cfg["frel"] = frel
+    return cfg
+
+
+# ---------------------------------------------------------------------------
 # Running circuits on the GPU
 # ---------------------------------------------------------------------------
 
@@ -533,8 +658,10 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
     hours : iterable of int, default 1..24
         1-based UTC hours.
     tx_antenna, rx_antenna : path or None
-        A type-14 ``.VOA`` sample file, or None for a 0 dBi isotropic pattern.
-        Both must be given together or both omitted.
+        A type-14 or type-13 ``.VOA`` file, or None for a 0 dBi isotropic
+        pattern -- independently per end.  Type-13 patterns are
+        azimuth-dependent; the slice at OFFAZIM (path azimuth minus
+        ``*_bearing``) is installed, exactly as ANTCALC does.
     tx_bearing, rx_bearing : float or None
         Antenna main-beam true azimuth, degrees.  OFFAZIM is then the angle
         between that beam and GEOM's path bearing at each end (ANTCALC's rule).
@@ -574,14 +701,21 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
         raise NotImplementedError(
             f"{len(freqs_f)} frequencies: 1..11 are supported per call")
 
-    if (tx_antenna is None) != (rx_antenna is None):
-        raise NotImplementedError(
-            "give both tx_antenna and rx_antenna, or neither (isotropic)")
-    if tx_antenna is None:
-        cant = isotropic_cant(system.power_kw, system.tx_gos, system.rx_gos)
-    else:
-        cant = cant_from_files(tx_antenna, rx_antenna, system.power_kw,
-                               system.tx_gos, system.rx_gos)
+    def _parse(path):
+        if path is None:
+            return None
+        try:
+            return read_antenna(path)
+        except UnsupportedAntennaType as e:
+            raise NotImplementedError(str(e)) from e
+
+    # ANTCALC per circuit: either end may independently be isotropic, a
+    # type-14 table, or a type-13 azimuth-dependent table (which consumes
+    # the path azimuth at that end, so the cant is built from tx/rx here).
+    cant = antcalc_cant(_parse(tx_antenna), _parse(rx_antenna), tx, rx,
+                        power_kw=system.power_kw, tx_gos=system.tx_gos,
+                        rx_gos=system.rx_gos, tx_bearing=tx_bearing,
+                        rx_bearing=rx_bearing, long_path=long_path)
 
     # One coefficient map for the whole request; one INDEPENDENT circuit per
     # hour (fresh /SON/), all sharing the iono and antenna tables.

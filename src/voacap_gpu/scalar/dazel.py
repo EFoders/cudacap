@@ -223,6 +223,91 @@ def _elevations(z, gc, d, delht, thts, rhts, set_zdgc):
         z.zrakof = F32(atakof)
 
 
+def dazel0(ztlat, ztlon, zrlat, zrlon):
+    """DAZEL0 (reference/voacapl/src/wp10dwin/dazel0.for) -> (ZTAZ, ZDGC).
+
+    ANTCALC's azimuth source: the great-circle bearing at T of R, degrees
+    clockwise from north, plus the great-circle distance in km.  A trimmed
+    stand-alone copy of DAZEL mode 0 with three deliberate differences that
+    make it NOT interchangeable with :func:`dazel`:
+
+    * pole clamp to +-89.999 (dazel.for clamps to +-89.9),
+    * an antipodal nudge -- when the points are within ~0.001 deg of exactly
+      opposite, the receiver latitude is moved 0.1 deg (dazel0.for:65-71) so
+      the bearing stays defined,
+    * no elevation/take-off section (returns after ZDGC).
+
+    Heights are the DATA-statement zeros (dazel0.for:54).  Same precision
+    contract as DAZEL: interface REAL*4, internals double, single-precision
+    literals narrowed through float32 before widening.
+    """
+    tlats = F64(F32(ztlat))
+    tlons = F64(F32(ztlon))
+    rlats = F64(F32(zrlat))
+    rlons = F64(F32(zrlon))
+    if tlats <= F64(-90.0):
+        tlats = F64(F32(-89.999))
+    if tlats >= F64(90.0):
+        tlats = F64(F32(89.999))
+    if rlats <= F64(-90.0):
+        rlats = F64(F32(-89.999))
+    if rlats >= F64(90.0):
+        rlats = F64(F32(89.999))
+    # 65-71: antipodal nudge -- the azimuth is undefined for exactly
+    # opposite points, so the receiver is moved a little.
+    if (np.abs(np.abs(tlons - rlons) - F64(180.0)) <= F64(F32(0.001))
+            and np.abs(tlats + rlats) <= F64(F32(0.002))):
+        rlats = rlats + F64(F32(0.1))
+        if rlats >= F64(90.0):
+            rlats = F64(F32(89.9))
+
+    delat = rlats - tlats
+    adlat = np.abs(delat)
+    delon = rlons - tlons
+    if delon - F64(-180.0) < 0.0:           # arithmetic IF, label 12 loop
+        while delon - F64(-180.0) < 0.0:
+            delon = delon + F64(360.0)
+    else:                                   # label 16/18 loop
+        while delon - F64(180.0) > 0.0:
+            delon = delon - F64(360.0)
+    adlon = np.abs(delon)
+
+    if adlon - _C1E5 <= 0.0:                # 22
+        if adlat - _C1E5 <= 0.0:            # 24: same coordinates
+            return F32(0.0), F32(0.0)
+        # 40-50: same longitude, distinct latitudes
+        ztaz = F32(180.0) if delat <= 0.0 else F32(0.0)
+        gc = adlat * DTOR
+        return ztaz, F32(gc * RERTH)
+
+    # 55-60: distinct longitudes
+    if delon <= 0.0:
+        wlat = rlats * DTOR
+        elat = tlats * DTOR
+    else:
+        wlat = tlats * DTOR
+        elat = rlats * DTOR
+    sdlat = np.sin(F64(0.5) * adlat * DTOR)
+    sdlon = np.sin(F64(0.5) * adlon * DTOR)
+    sadln = np.sin(adlon * DTOR)
+    cwlat = np.cos(wlat)
+    celat = np.cos(elat)
+    p = F64(2.0) * (sdlat * sdlat + sdlon * sdlon * cwlat * celat)
+    sgc = np.sqrt(p * (F64(2.0) - p))
+    sdlat = np.sin(elat - wlat)
+    cwaz = (F64(2.0) * celat * np.sin(wlat) * sdlon * sdlon + sdlat) / sgc
+    swaz = sadln * celat / sgc
+    waz = np.arctan2(swaz, cwaz) * RTOD
+    ceaz = (F64(2.0) * cwlat * np.sin(elat) * sdlon * sdlon - sdlat) / sgc
+    seaz = sadln * cwlat / sgc
+    eaz = np.arctan2(seaz, ceaz) * RTOD
+    eaz = F64(360.0) - eaz                  # 110
+    ztaz = F32(eaz) if delon <= 0.0 else F32(waz)   # 111/115
+    cgc = F64(1.0) - p                      # 120
+    gc = np.arctan2(sgc, cgc)
+    return ztaz, F32(gc * RERTH)            # 140
+
+
 def _mode1(z: Azel) -> None:
     # 198-217: end point from bearing and distance
     tlatr = F64(z.ztlat) * DTOR

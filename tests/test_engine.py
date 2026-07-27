@@ -233,15 +233,25 @@ def test_predict_smoke():
     assert labels <= {" E", "F1", "F2", "ES", " N", ""}
 
 
-def test_unsupported_raises():
-    """The refusals: too many freqs, an unknown METHOD, a half-given antenna."""
+def test_unsupported_raises(tmp_path):
+    """The refusals: too many freqs, an unknown METHOD, a synthesised antenna.
+
+    (A half-given antenna pair is no longer a refusal: ANTCALC handles each
+    end independently, so pattern-TX + isotropic-RX is now the common case.)
+    """
     with pytest.raises(NotImplementedError):
         build_circuit((0, 0), (10, 10), 6, 100, 12, list(range(1, 13)))
     with pytest.raises(NotImplementedError):
         build_circuit((0, 0), (10, 10), 6, 100, 12, [10.0], method=99)
+    # type 1 is method-of-moments synthesis -- out of scope, must refuse
+    synth = tmp_path / "synth.voa"
+    synth.write_text("some dipole\n 3     3 parameters\n"
+                     "  2.15  [ 1] Max Gain dBi..:\n"
+                     "  1     [ 2] Antenna Type..:\n"
+                     "  0.0   [ 3] Efficiency\n")
     with pytest.raises(NotImplementedError):
         predict((0, 0), (10, 10), freqs=[10.0], month=6, ssn=100,
-                tx_antenna="x.voa", rx_antenna=None)
+                tx_antenna=str(synth), rx_antenna=None)
 
 
 # ---------------------------------------------------------------------------
@@ -513,3 +523,163 @@ def test_propsl_snr_reliability_params():
                                        required_reliability=80))
     assert float(c.rsn) == pytest.approx(50.0)
     assert int(c.lufp) == 80
+
+
+# ---------------------------------------------------------------------------
+# Type-13 azimuth-dependent antennas (ANTCALC antcalc.for:268-284 + DAZEL0)
+# ---------------------------------------------------------------------------
+
+from voacap_gpu.engine import antcalc_cant                      # noqa: E402
+from voacap_gpu.scalar.dazel import dazel0                      # noqa: E402
+from voacap_gpu.scalar.readant import parse_antenna             # noqa: E402
+
+
+def _t13_text(gain_fn, maxgain=1.5, eff=-0.25):
+    """Synthesise a type-13 .VOA: 360 azimuth rows x 91 elevations.
+
+    ``gain_fn(az, el)`` -> dB; values are formatted f7.3 exactly as the stock
+    files are, so the parse is the real fixed-column path.
+    """
+    lines = ["synthetic type 13 pattern",
+             " 3     3 parameters",
+             f"  {maxgain:.2f}  [ 1] Max Gain dBi..:",
+             "  13    [ 2] Antenna Type..:",
+             f"  {eff:.2f}  [ 3] Efficiency"]
+    for az in range(360):
+        vals = [gain_fn(az, el) for el in range(91)]
+        for lo in range(0, 91, 10):
+            chunk = vals[lo:lo + 10]
+            lines.append(" " * 9 + "".join(f"{v:7.3f}" for v in chunk))
+    return "\n".join(lines) + "\n"
+
+
+def test_dazel0_bearings():
+    """DAZEL0 basics: cardinal bearings, wrap, and agreement with DAZEL."""
+    az, dgc = dazel0(0.0, 0.0, 0.0, 10.0)          # due east on the equator
+    assert az == pytest.approx(90.0, abs=1e-4)
+    assert dgc == pytest.approx(10.0 * 111.19, rel=1e-3)
+    az, _ = dazel0(0.0, 0.0, 10.0, 0.0)            # due north
+    assert az == pytest.approx(0.0, abs=1e-4)
+    az, _ = dazel0(10.0, 0.0, 0.0, 0.0)            # due south
+    assert az == pytest.approx(180.0, abs=1e-4)
+    # antipodal nudge must keep the bearing defined (no NaN/exception)
+    az, dgc = dazel0(10.0, 0.0, -10.0, 180.0)
+    assert np.isfinite(az) and np.isfinite(dgc)
+    # a general path agrees with the full DAZEL mode 0 to well under the
+    # 1-degree azimuth table resolution
+    from voacap_gpu.scalar.dazel import Azel, dazel
+    z = Azel(ztlat=40.0, ztlon=-105.0, zrlat=50.0, zrlon=0.0)
+    dazel(z, 0)
+    az, dgc = dazel0(40.0, -105.0, 50.0, 0.0)
+    assert az == pytest.approx(float(z.ztaz), abs=1e-3)
+    assert dgc == pytest.approx(float(z.zdgc), rel=1e-4)
+
+
+def test_t13_install_exact(tmp_path):
+    """load_p2p_t13 reproduces ANTCALC's arm value-for-value.
+
+    Checks the truncated azimuth index, the 359->0 wrap, the f32 interpolation
+    order, the PARM(1) add, the -99.99 floor, the f7.3 quantisation, and that
+    only rows MINFREQ..MAXFREQ are touched (row 1 keeps the zero preset).
+    """
+    from voacap_gpu.scalar.antennastate import CantennaState
+
+    gain_fn = lambda az, el: (az % 36) / 10.0 - el / 100.0      # noqa: E731
+    ant = parse_antenna(_t13_text(gain_fn, maxgain=1.5, eff=-0.25))
+    assert ant.jant == 13
+
+    cant = CantennaState()
+    cant.load_p2p_t13(1, ant, 1, 123.4)
+    off = F32(123.4)
+    fract = F32(off - F32(123.0))
+    g1 = ant.gains360[123]
+    g2 = ant.gains360[124]
+    expect = (g1 + (g2 - g1) * fract) + ant.parm[0]
+    expect = np.maximum(expect, F32(-99.99))
+    expect = (np.round(np.float64(expect) * 1000.0) / 1000.0).astype(np.float32)
+    assert np.array_equal(np.asarray(cant.array[2, 1:92, 1]), expect)
+    # every frequency row 2..30 carries the same cut; row 1 is untouched
+    for f in (3, 17, 30):
+        assert np.array_equal(np.asarray(cant.array[f, 1:92, 1]), expect)
+    assert not np.any(np.asarray(cant.array[1, :, 1]))
+    assert float(cant.aeff[1, 1]) == 0.0
+    assert float(cant.aeff[2, 1]) == pytest.approx(-0.25)
+    assert float(cant.xfqs[1]) == 2.0 and float(cant.xfqe[1]) == 30.0
+
+    # 359 -> 0 wrap
+    cant2 = CantennaState()
+    cant2.load_p2p_t13(1, ant, 1, 359.5)
+    w1, w2 = ant.gains360[359], ant.gains360[0]
+    wexp = (w1 + (w2 - w1) * F32(F32(359.5) - F32(359.0))) + ant.parm[0]
+    wexp = (np.round(np.float64(np.maximum(wexp, F32(-99.99))) * 1000.0)
+            / 1000.0).astype(np.float32)
+    assert np.array_equal(np.asarray(cant2.array[2, 1:92, 1]), wexp)
+
+    # deep nulls floor at -99.99 (ANTCALC's gain-file clamp)
+    deep = parse_antenna(_t13_text(lambda az, el: -99.9, maxgain=-50.0))
+    cant3 = CantennaState()
+    cant3.load_p2p_t13(1, deep, 1, 10.0)
+    assert np.all(np.asarray(cant3.array[2, 1:92, 1]) == F32(-99.99))
+
+
+def test_antcalc_cant_t13_azimuth_dependence(tmp_path):
+    """A rotated beam installs a different azimuth slice; isotropic RX rides
+    along as its own entry (the mixed case Prop-SL sends most often)."""
+    f = tmp_path / "dir.t13"
+    f.write_text(_t13_text(lambda az, el: 10.0 * np.cos(np.radians(az)),
+                           maxgain=0.0, eff=0.0))
+    ant = parse_antenna(f.read_text())
+    tx, rx = (40.0, -105.0), (50.0, 0.0)
+    ztaz, _ = dazel0(*tx, *rx)
+
+    on_path = antcalc_cant(ant, None, tx, rx, tx_bearing=float(ztaz))
+    rotated = antcalc_cant(ant, None, tx, rx,
+                           tx_bearing=float(F32(ztaz) - F32(90.0)))
+    # beam on the path: OFFAZIM 0 -> the +10 dB azimuth-0 slice
+    assert float(on_path.offazim[1]) == pytest.approx(0.0, abs=1e-4)
+    assert np.allclose(np.asarray(on_path.array[2, 1:92, 1]), 10.0, atol=5e-3)
+    # beam 90 deg off the path: OFFAZIM 90 -> the 0 dB slice
+    assert float(rotated.offazim[1]) == pytest.approx(90.0, abs=1e-3)
+    assert np.allclose(np.asarray(rotated.array[2, 1:92, 1]), 0.0, atol=2e-2)
+    # the isotropic RX entry: zero table, full 0..30 MHz bracket
+    assert int(on_path.iats[2]) == 2
+    assert not np.any(np.asarray(on_path.array[:, :, 2]))
+
+
+def test_predict_t13_smoke(tmp_path):
+    """predict() end-to-end on the GPU with a directive type-13 TX pattern:
+    rotating the beam 90 degrees off the path costs ~10 dB of signal."""
+    pytest.importorskip("cupy")
+    f = tmp_path / "dir.t13"
+    f.write_text(_t13_text(lambda az, el: 10.0 * np.cos(np.radians(az)),
+                           maxgain=0.0, eff=0.0))
+    tx, rx = (40.0, -105.0), (50.0, 0.0)
+    ztaz, _ = dazel0(*tx, *rx)
+    kw = dict(freqs=[14.0], month=7, ssn=100, hours=[12])
+
+    on = predict(tx, rx, tx_antenna=str(f), tx_bearing=float(ztaz), **kw)
+    off = predict(tx, rx, tx_antenna=str(f),
+                  tx_bearing=float(F32(ztaz) - F32(90.0)), **kw)
+    assert int(on.status[0]) == 0 and int(off.status[0]) == 0
+    d = float(on.dbw[0, 0]) - float(off.dbw[0, 0])
+    assert d == pytest.approx(10.0, abs=0.5), (
+        f"rotating the beam changed signal by {d} dB, expected ~10")
+
+
+def test_t13_offazim_360_wraps(tmp_path):
+    """OFFAZIM landing on exactly 360.0 wraps to the azimuth-0 slice instead
+    of indexing one past the table (a due-north path with beam 0)."""
+    from voacap_gpu.scalar.antennastate import CantennaState
+
+    ant = parse_antenna(_t13_text(lambda az, el: az / 100.0))
+    cant = CantennaState()
+    cant.load_p2p_t13(1, ant, 1, 360.0)          # must not raise
+    q = (np.round(np.float64(ant.gains360[0] + ant.parm[0]) * 1000.0)
+         / 1000.0).astype(np.float32)
+    assert np.array_equal(np.asarray(cant.array[2, 1:92, 1]), q)
+    # and through antcalc_cant with a due-north geometry + beam 0
+    f = tmp_path / "n.t13"
+    f.write_text(_t13_text(lambda az, el: az / 100.0))
+    c = antcalc_cant(parse_antenna(f.read_text()), None,
+                     (10.0, 0.0), (60.0, 0.0), tx_bearing=0.0)
+    assert 0.0 <= float(c.offazim[1]) < 360.0

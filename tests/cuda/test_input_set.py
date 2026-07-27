@@ -244,6 +244,101 @@ def test_poisoning_the_declared_scratch_changes_nothing():
           "results identical")
 
 
+# ---------------------------------------------------------------------------
+# THE DECKS ARE NOT THE WORLD
+# ---------------------------------------------------------------------------
+
+def _es_active_circuits():
+    """Circuits with SPORADIC E LIVE, built from raw inputs rather than a deck.
+
+    Every one of the 21 oracle decks is a VOACAP deck: FPROB (1,1,1,0), Es
+    disabled.  So ESIND never writes ``layers.hs`` in the replay, HS is zero in
+    all 504 circuit-hours, and the zeroing sweep that established the input set
+    could not tell "not read" from "always zero".  This builds the other case:
+    ICEPAC's URSI + FPROB (1,1,1,0.70), a January path at low SSN, where Es is
+    present for most of the day.
+    """
+    from voacap_gpu import engine
+    from voacap_gpu.cuda.driver import pack_circuit
+    from voacap_gpu.scalar.redmap import redmap
+
+    freqs = (5.0, 7.0, 10.0, 14.0, 18.0, 21.0, 25.0)
+    _c, system = engine._resolve_model("icepac", "URSI", engine.System())
+    ist = redmap(engine._COEFFS_DIR, "URSI", 1, np.float32(30.0))
+    paths = [((51.50, -0.13), (48.85, 2.35)),
+             ((40.00, -105.0), (40.00, -70.0)),
+             ((40.00, -105.0), (50.00, 0.0)),
+             ((-23.00, 30.00), (-35.00, 138.00))]
+    cant = engine.isotropic_cant(power_kw=1.0)
+    bufs, rays, ipf = [], [], []
+    for tx, rx in paths:
+        for h in range(1, 25):
+            circ, ip = engine.build_circuit(tx, rx, 1, 30.0, h, freqs,
+                                            method=30, system=system,
+                                            cant=cant, iono=ist)
+            b, r = pack_circuit(circ)
+            bufs.append(b)
+            rays.append(r)
+            ipf.append(ip)
+    n = len(bufs)
+    return dict(entries=np.stack(bufs), entries_rays=np.stack(rays),
+                ipflags=np.array(ipf, np.int32), ionos=[ist],
+                iono_idx=np.zeros(n, np.int32), cants=[cant],
+                ant_idx=np.zeros(n, np.int32))
+
+
+def test_the_reduced_upload_is_output_neutral_with_sporadic_e():
+    """The output-neutrality claim, on the arm no oracle deck exercises.
+
+    THIS TEST IS A REGRESSION, and it is worth saying what it caught.
+    ``layers.hs`` -- the Es virtual height -- was filed as DEAD by the original
+    sweep because it is zero in every replay deck, so zeroing it moved nothing.
+    It is read by esmod/esreg on the Es arms.  With Es live, the compact path
+    and the full path disagreed on 192 of 2,688 /SON/ SNDB cells: the memset
+    handed the Es modes a zero reflection height.  HS is now in INPUT_FIELDS
+    and this is what holds it there.
+
+    The general lesson, for whoever extends the input set next: the sweep is
+    only as wide as the decks it is run against, and a field that is live only
+    on an arm no deck takes will always read as dead.
+    """
+    v = _es_active_circuits()
+    assert (np.asarray(v["entries"]["layers"]["hs"]) != 0).any(), (
+        "the fixture is meant to have sporadic E present")
+    full, _rays, status = _launch(v, v["entries"], v["entries_rays"])
+    assert (status == 0).all()
+    got = _results(v, v["entries"], v["entries_rays"])
+    _assert_results_match(tuple(got), _as_quad(full, status),
+                          "reduced upload, Es live")
+
+
+def test_poisoning_the_declared_scratch_changes_nothing_with_sporadic_e():
+    """The poison statement too, on the Es arm.
+
+    The float half only: integer scratch is scrambled rather than NaN'd in the
+    replay version (an arbitrary int index could fault instead of failing an
+    assert), and that reasoning is unchanged here, so this narrows to the
+    floats -- which is where HS lives and where a future Es-only input would.
+    """
+    v = _es_active_circuits()
+    full, _rays, status = _launch(v, v["entries"], v["entries_rays"])
+    assert (status == 0).all()
+
+    circ_scratch, _rays_scratch = _scratch_fields()
+    ent = v["entries"].copy()
+    nf = 0
+    for f in circ_scratch:
+        if _kind(CIRCUIT_DTYPE, f) == "f":
+            _set(ent, f, POISON)
+            nf += 1
+    assert nf, "nothing to poison — the declaration is suspect"
+    got, _r2, st2 = _launch(v, ent, v["entries_rays"])
+    _assert_results_match(_as_quad(got, st2), _as_quad(full, status),
+                          "poisoned scratch, Es live")
+    print(f"\n{nf} CircuitState float scratch fields poisoned with Es live: "
+          "results identical")
+
+
 @pytest.mark.skipif(not DECKS, reason="oracle dump missing")
 def test_the_arena_does_not_have_to_be_re_zeroed():
     """A reused arena leaves the previous batch's scratch in place.

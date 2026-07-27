@@ -213,6 +213,7 @@ INPUT_FIELDS = (
     "layers.glat", "layers.gyz",
     "layers.fi", "layers.yi", "layers.hi",
     "layers.fs",                # STATIC: read by esmod/regmod, never written
+    "layers.hs",                # THE SPORADIC-E BLIND SPOT -- see below
     "layers.ielect",            # STATIC: read by lecden, never written
     "layers.clck", "layers.sigpat", "layers.epspat",
     # --- /MUFS/ ------------------------------------------------------------
@@ -229,6 +230,29 @@ INPUT_FIELDS = (
     "time.gmtr",
     "lpath.delopt", "lpath.gmin", "lpath.ymin",
 )
+
+# THE SPORADIC-E BLIND SPOT, and why it took the device-setup path to find it.
+#
+# ``layers.hs`` is the Es virtual height.  ESIND writes it, but ONLY when FPROB
+# PSC(4) > 0 -- and every one of the 21 replay decks is a VOACAP deck with
+# FPROB (1,1,1,0), Es disabled.  So HS is zero in all 504 replay circuit-hours,
+# zeroing it changes nothing, and the sweep filed it under DEAD.  It is not
+# dead: esmod/esreg read it on the Es arms, which those decks never take.
+#
+# Consequence, and it was a live defect rather than a theoretical one: on
+# ICEPAC (URSI + FPROB (1,1,1,0.70), the arm Prop-SL runs for its ICEPAC
+# model) ``luffy_results`` and the full-upload ``launch_luffy`` DISAGREED --
+# measured at 192 of 2,688 /SON/ SNDB cells on a 4-path, 24-hour January
+# sweep, because the compact path memset HS to zero on the device and the Es
+# modes then propagated at ground level.  Carrying it costs 24 bytes.
+#
+# The generalisation worth keeping: the input set is measured against the
+# decks that exist, so a field that is only live on an arm no deck exercises
+# reads as dead.  ``layers.fs``, ``layers.ielect``, ``muf.afmuf`` and the LUF
+# ladders were already carried on exactly that argument, made by reading the
+# source; HS is the case where the argument was not made and should have been.
+# It surfaced because the device-setup path RUNS ESIND and therefore produced
+# a non-zero HS where the host path had been sending zeros.
 
 # ... plus every loose scalar.  Fourteen of the eighteen are measured inputs;
 # JLONG is measured dead and TLONG / NYEAR_IS_2089 / INFO are zero in every
@@ -349,6 +373,97 @@ _IONO_TABLES = (("fam", (14, 12)), ("dud", (5, 12, 5)),
                 ("fakp", (29, 16, 6)), ("fakmap", (29, 16)),
                 ("hmym", (29, 16)), ("fakabp", (2, 6)), ("abmap", (2, 3)),
                 ("sys", (9, 16, 6)), ("perr", (9, 4, 6)))
+
+
+# ---------------------------------------------------------------------------
+# DEVICE-SIDE SETUP — the raw-parameter ABI (cuda/kernels/setup.cuh)
+# ---------------------------------------------------------------------------
+# ``UPLOAD_FIELDS`` cut what crosses the bus to what LUFFY READS.  It did
+# nothing about what it costs to BUILD, and that is where the time actually
+# went: measured on the Prop-SL sidecar at a global grid, host prep was 97.6%
+# of wall-clock against 0.9% for the kernel and PCIe together.  So the setup
+# chain moved to the device too (setup.cuh), and a circuit-hour is now
+# described by ``SETUP_PARAMS_DTYPE`` -- 32 BYTES, against 3,228.
+#
+# Same numpy-vs-C layout argument as CIRCUIT_DTYPE: every member is 4 bytes,
+# so unaligned numpy packing equals the C struct, and ``setup_struct_sizeof``
+# asserts it against the device compiler's own ``sizeof``.
+
+SETUP_PARAMS_DTYPE = np.dtype([
+    ("tlatd", F32), ("tlongd", F32),     # transmitter, degrees (S/W negative)
+    ("rlatd", F32), ("rlongd", F32),     # receiver
+    ("hour", I32),                       # 1-based UTC hour
+    ("npsl", I32),                       # GEOM long-path flag
+    ("iono", I32),                       # which ionosphere slot
+    ("cfg", I32),                        # which SETUP_CONFIG slot
+])
+
+SETUP_CONFIG_DTYPE = np.dtype([
+    ("pole_lat", F32), ("pole_lon", F32),
+    ("amind", F32), ("rsn", F32), ("dmp", F32), ("pmp", F32),
+    ("psc", F32, (5,)),
+    ("lufp", I32), ("method", I32), ("noise", I32), ("mspec", I32),
+    ("nyear_is_2089", I32), ("want_service_prob", I32), ("info", I32),
+    ("itim", I32),
+    ("frel", F32, (30,)),
+])
+
+SETUP_BYTES_PER_THREAD = SETUP_PARAMS_DTYPE.itemsize
+
+# The setup chain's own per-ionosphere tables.  The five REDMAP overlays it
+# shares with LUFFY (fakp/fakmap/hmym/fakabp/abmap) come from
+# ``shared_iono_tables`` and are NOT duplicated here.
+_SETUP_TABLES = (("ikim", (10, 6), I32), ("anew", (3,), F32),
+                 ("bnew", (3,), F32), ("achi", (2,), F32),
+                 ("bchi", (2,), F32), ("f2d", (16, 6, 6), F32))
+
+# VIRTIM rows precomputed per ionosphere, hours 0..24.  See setup.cuh: the row
+# depends only on GMT, and on the ITIM >= 0 arm GMT is the requested hour, so
+# 25 rows serve every circuit rather than 1,276 bytes travelling per thread.
+SETUP_NHOUR = 25
+SETUP_NAB = 319
+
+
+class IonoSlot:
+    """One ionosphere for the device-setup path: REDMAP output + its month/SSN.
+
+    ``redmap`` does not keep the month and SSN it was called with, but the
+    setup chain needs both (TIMVAR reads MONTH for the solar-declination
+    table, CURMUF reads SSN), so they travel alongside.
+    """
+
+    __slots__ = ("iono", "month", "ssn")
+
+    def __init__(self, iono, month, ssn):
+        self.iono, self.month, self.ssn = iono, int(month), F32(ssn)
+
+
+def setup_iono_tables(slots):
+    """``IonoSlot`` list -> the flat tables only the device setup chain needs.
+
+    Includes the precomputed VIRTIM rows: 25 hours x 319 floats per ionosphere
+    (32 KB), which replaces one 1,276-byte row per circuit-hour.
+    """
+    from voacap_gpu.scalar.virtim import virtim
+
+    out = {}
+    for name, shape, dt in _SETUP_TABLES:
+        stack = []
+        for s in slots:
+            a = np.ascontiguousarray(getattr(s.iono, name), dt).ravel()
+            assert a.size == int(np.prod(shape)), (name, a.size, shape)
+            stack.append(a)
+        out[name] = np.concatenate(stack) if stack else np.zeros(0, dt)
+    ab = []
+    for s in slots:
+        for h in range(SETUP_NHOUR):
+            row = np.ascontiguousarray(virtim(s.iono, F32(h)), F32).ravel()
+            assert row.size == SETUP_NAB, row.size
+            ab.append(row)
+    out["ab"] = np.concatenate(ab) if ab else np.zeros(0, F32)
+    out["month"] = np.array([s.month for s in slots], I32)
+    out["ssn"] = np.array([s.ssn for s in slots], F32)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1380,3 +1495,570 @@ def run_luffy(circuits, ipflags, block=32, write_back=True):
         for c, b, r in zip(circuits, out, out_rays):
             unpack_circuit(b, r, c)
     return circuits, status
+
+
+# ---------------------------------------------------------------------------
+# THE DEVICE-SETUP PATH: raw parameters in, results out, no host build at all
+# ---------------------------------------------------------------------------
+
+_SETUP_SRC = r'''
+#include "setup.cuh"
+
+extern "C" __global__ void setup_batch(
+        CircuitState* circ,
+        int* rays_nang, float* rays_ang,
+        int* ipflag, float* muf3,
+        const SetupParams* prm, const SetupConfig* cfg,
+        const float* ab, const int* ikim,
+        const float* anew, const float* bnew,
+        const float* achi, const float* bchi,
+        const float* fakp, const float* fakmap, const float* hmym,
+        const float* fakabp, const float* abmap,
+        const float* f2d, const int* month, const float* ssn,
+        int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    SetupTables t;
+    t.ab = ab; t.ikim = ikim;
+    t.anew = anew; t.bnew = bnew; t.achi = achi; t.bchi = bchi;
+    t.fakp = fakp; t.fakmap = fakmap; t.hmym = hmym;
+    t.fakabp = fakabp; t.abmap = abmap;
+    t.f2d = f2d; t.month = month; t.ssn = ssn;
+    // IFOB is scratch to the setup chain -- SANG writes NANG and ANG only --
+    // so the view's third pointer is never dereferenced here.
+    RaysView rays = rays_view_soa(rays_nang, rays_ang, nullptr, n, i);
+    SetupParams p = prm[i];
+    ipflag[i] = setup_circuit(&circ[i], rays, p, cfg[p.cfg], t,
+                              muf3 + (size_t)i * 3);
+}
+
+extern "C" __global__ void setup_struct_sizes(int* out) {
+    out[0] = (int)sizeof(SetupParams);
+    out[1] = (int)sizeof(SetupConfig);
+}
+'''
+
+
+def load_setup_kernel(fast_math: bool = False):
+    """Compile (once, cached per option set) the device-setup kernel module."""
+    opts = ("-DVOACAP_FAST_MATH",) if fast_math else ()
+    return load(_SETUP_SRC, opts)
+
+
+def setup_struct_sizeof():
+    """``(sizeof(SetupParams), sizeof(SetupConfig))`` per the device compiler.
+
+    The same offset proof ``circuit_state_sizeof`` carries for CircuitState:
+    every member of both structs is four bytes, so numpy's unaligned packing
+    equals the C layout iff the totals agree.
+    """
+    import cupy as cp
+    out = cp.zeros(2, np.int32)
+    load_setup_kernel().get_function("setup_struct_sizes")((1,), (1,), (out,))
+    cp.cuda.runtime.deviceSynchronize()
+    return tuple(int(v) for v in cp.asnumpy(out))
+
+
+class SetupLuffy:
+    """Raw circuit parameters -> results, with the host doing NO per-circuit work.
+
+    Two launches over one set of resident device buffers.  ``setup_batch``
+    (cuda/kernels/setup.cuh) builds each CircuitState in place from 32 bytes of
+    parameters and the shared tables; ``luffy_batch`` then runs on exactly
+    those states without them ever crossing the bus.  What actually travels is
+
+        up    32 bytes a circuit-hour, plus one SETUP_CONFIG per SYSTEM card
+        down  1,700 bytes a circuit-hour (``LuffyResults``) + 12 for MUF/FOT/HPF
+
+    against 3,228 up and 1,700 down for ``LuffyArena``, and -- the part that
+    matters far more -- against a Python ``build_circuit`` per circuit-hour.
+
+    THE STATE BUFFERS ARE ZEROED ONCE AND NEVER AGAIN, exactly as
+    ``LuffyArena`` does, and for the same reason: nothing outside
+    ``UPLOAD_FIELDS`` is read before it is written, and ``setup_batch`` writes
+    every one of those fields.  Leftovers from the previous submission are
+    values this pair of kernels itself produced.
+
+    ``n`` is FIXED for the lifetime of the object, because /RAYS/'s SoA column
+    stride is the launch's thread count (raysview.cuh).  Submit a shorter batch
+    and the tail lanes simply compute an answer nobody reads -- but pad them
+    with a REPEAT of a real row, never zeros: a zeroed ``layers.km`` hangs the
+    area loop.  ``run`` does that padding itself.
+
+    Usage::
+
+        slots = [IonoSlot(redmap(dir, "CCIR", 7, 100.0), 7, 100.0)]
+        rig = SetupLuffy(n, slots, shared_iono_tables([s.iono for s in slots]),
+                         shared_antenna_tables(cants))
+        res, muf3 = rig.run(params, cfgs, ant_idx)
+    """
+
+    def __init__(self, n, slots, iono, ant=None, block=32, warp=False,
+                 warps_per_block=4, fast_math=False):
+        import cupy as cp
+
+        self.n = int(n)
+        self.block = int(block)
+        self._cp = cp
+        self._setup_fn = load_setup_kernel(fast_math).get_function(
+            "setup_batch")
+        self._setup_grid = ((self.n + self.block - 1) // self.block,)
+
+        # per-thread state, allocated and zeroed ONCE
+        self._d_circ = cp.zeros(self.n * CIRCUIT_DTYPE.itemsize, np.uint8)
+        self._d_soa = cp.zeros((_RAYS_WORDS, self.n), np.int32)
+        self._d_status = cp.full(self.n, -1, np.int32)
+        self._d_ipflag = cp.zeros(self.n, np.int32)
+        self._d_muf3 = cp.zeros((self.n, 3), np.float32)
+        self._d_prm = cp.zeros(self.n * SETUP_PARAMS_DTYPE.itemsize, np.uint8)
+        self._d_ai = cp.zeros(self.n, np.int32)
+        self._d_cfg = None                       # sized on first submission
+
+        # shared read-only tables — one copy for the object's lifetime.  The
+        # IONOSPHERE is resident because it is big (REDMAP's maps) and depends
+        # only on (coeff, month, SSN); the ANTENNAS are not, because a type-13
+        # pattern is AZIMUTH-DEPENDENT and a grid therefore builds one
+        # /cantenna/ per cell.  So they are set per submission -- see
+        # `set_antennas` -- with an optional table here for the fixed-antenna
+        # caller who would rather pay the copy once.
+        st = setup_iono_tables(slots)
+        d = {k: cp.asarray(v) for k, v in iono.items()}
+        s = {k: cp.asarray(v) for k, v in st.items()}
+        self._tables = (d, s)                    # keep the copies alive
+        self._setup_shared = (s["ab"], s["ikim"], s["anew"], s["bnew"],
+                              s["achi"], s["bchi"], d["fakp"], d["fakmap"],
+                              d["hmym"], d["fakabp"], d["abmap"], s["f2d"],
+                              s["month"], s["ssn"])
+
+        d_nang, d_ang, d_ifob = _rays_views(self._d_soa)
+        # IONO_IDX for LUFFY is the SetupParams `iono` column, which the host
+        # already has; it is uploaded per submission alongside the parameters.
+        self._d_ii = cp.zeros(self.n, np.int32)
+        self._luffy_head = (self._d_circ, d_nang, d_ang, d_ifob,
+                            self._d_ipflag, self._d_ii, self._d_ai,
+                            d["fam"], d["dud"], d["fakp"], d["fakmap"],
+                            d["hmym"], d["fakabp"], d["abmap"], d["sys"],
+                            d["perr"], d["f2d111"])
+        self._luffy_args = None
+        if ant is not None:
+            self.set_antennas(ant)
+        if warp:
+            wpb = int(warps_per_block)
+            self._luffy_fn = load_kernel(fast_math=fast_math).get_function(
+                "luffy_batch_warp")
+            self._luffy_grid = ((self.n + wpb - 1) // wpb,)
+            self._luffy_block = (32 * wpb,)
+            self._luffy_shared = wpb * SMOOTHSTORE_BYTES
+        else:
+            self._luffy_fn = load_kernel(fast_math=fast_math).get_function(
+                "luffy_batch")
+            self._luffy_grid = ((self.n + self.block - 1) // self.block,)
+            self._luffy_block = (self.block,)
+            self._luffy_shared = 0
+
+    @property
+    def state(self):
+        """The ``(d_circ, d_soa, d_status, n)`` tuple the fetchers take."""
+        return self._d_circ, self._d_soa, self._d_status, self.n
+
+    def set_antennas(self, ant):
+        """Install a ``shared_antenna_tables`` dict for the next submissions.
+
+        Separate from the ionosphere because it changes on a different clock:
+        the ionosphere is per (coefficient set, month, SSN) and a whole request
+        shares one, while a type-13 pattern is azimuth-dependent and a grid
+        builds one /cantenna/ per CELL.  ``numants`` is the last-dimension
+        extent gain.cuh indexes with, so it is baked into the argument tuple
+        and the tuple is rebuilt here rather than patched.
+        """
+        cp = self._cp
+        a = {k: cp.asarray(v) for k, v in ant.items() if k != "numants"}
+        self._ant = a                            # keep the copies alive
+        self._luffy_args = self._luffy_head + (
+            a["array"], a["aeff"], a["iats"], a["xfqs"], a["xfqe"],
+            a["offazim"], a["pwrdba"], np.int32(ant["numants"]),
+            self._d_status, np.int32(self.n))
+        return self
+
+    def upload(self, params, cfgs, ant_idx, ant=None):
+        """One batch's raw parameters into the resident buffers.  No launch."""
+        cp = self._cp
+        if ant is not None:
+            self.set_antennas(ant)
+        assert self._luffy_args is not None, (
+            "no antenna tables: pass ant= to the constructor, to upload/run, "
+            "or call set_antennas")
+        params = np.ascontiguousarray(params)
+        cfgs = np.ascontiguousarray(cfgs)
+        assert params.dtype == SETUP_PARAMS_DTYPE, params.dtype
+        assert cfgs.dtype == SETUP_CONFIG_DTYPE, cfgs.dtype
+        assert params.shape[0] == self.n, (params.shape, self.n)
+        assert int(params["cfg"].max(initial=0)) < cfgs.shape[0], (
+            "a SetupParams references a config slot that was not supplied")
+        self._d_prm.set(params.view(np.uint8).ravel())
+        self._d_cfg = cp.asarray(cfgs.view(np.uint8).ravel())
+        self._d_ii.set(np.ascontiguousarray(params["iono"], I32))
+        self._d_ai.set(np.ascontiguousarray(ant_idx, I32))
+        self._d_status.fill(-1)
+        return self
+
+    def launch_setup(self):
+        """Build the CircuitStates in place.  Split out so a test can read the
+        built state back BEFORE LUFFY mutates it, and so a benchmark can time
+        the two halves apart."""
+        self._setup_fn(self._setup_grid, (self.block,), (
+            self._d_circ, *_rays_views(self._d_soa)[:2], self._d_ipflag,
+            self._d_muf3, self._d_prm, self._d_cfg) + self._setup_shared
+            + (np.int32(self.n),))
+        return self
+
+    def launch_kernel(self):
+        """Run LUFFY over whatever the setup kernel left in the buffers."""
+        self._luffy_fn(self._luffy_grid, self._luffy_block, self._luffy_args,
+                       shared_mem=self._luffy_shared)
+        return self
+
+    def launch(self):
+        """setup_batch, then luffy_batch, over the resident buffers."""
+        return self.launch_setup().launch_kernel()
+
+    def results(self):
+        """``(LuffyResults, muf3)`` — muf3 is (n, 3): ALLMUF, FOT, HPF at IT."""
+        res = fetch_results(self.state)
+        return res, self._cp.asnumpy(self._d_muf3)
+
+    def run(self, params, cfgs, ant_idx, ant=None):
+        """A batch of ANY length <= n -> ``(LuffyResults, muf3)``.
+
+        Short batches are padded up to ``n`` by REPEATING the first row (never
+        zeros; see the class docstring) and the padding is dropped on the way
+        out, so a caller never sees the fixed width.
+        """
+        params = np.ascontiguousarray(params)
+        ant_idx = np.ascontiguousarray(ant_idx, I32)
+        c = params.shape[0]
+        assert c <= self.n, (c, self.n)
+        assert ant_idx.shape[0] == c, (ant_idx.shape, c)
+        if c < self.n:
+            pad = self.n - c
+            params = np.concatenate([params, np.repeat(params[:1], pad)])
+            ant_idx = np.concatenate([ant_idx, np.repeat(ant_idx[:1], pad)])
+        self.upload(params, cfgs, ant_idx, ant=ant).launch()
+        res, muf3 = self.results()
+        if c == self.n:
+            return res, muf3
+        return (LuffyResults(res.son[:c], res.xluf[:c], res.jmode[:c],
+                             res.status[:c]), muf3[:c])
+
+
+def setup_and_run(params, cfgs, slots, iono, ant, ant_idx, block=32,
+                  warp=False, warps_per_block=4, fast_math=False):
+    """One-shot device-setup round trip -> ``(LuffyResults, muf3)``.
+
+    Allocates for exactly this batch, so for a sweep of several batches keep a
+    ``SetupLuffy`` and call ``.run`` repeatedly instead.
+    """
+    rig = SetupLuffy(len(params), slots, iono, ant, block=block, warp=warp,
+                     warps_per_block=warps_per_block, fast_math=fast_math)
+    return rig.run(params, cfgs, ant_idx)
+
+
+class PipelinedSetupLuffy:
+    """``SetupLuffy`` across several CUDA streams, so the card never waits.
+
+    ``SetupLuffy`` runs one batch at a time and synchronises to read it back,
+    which means the GPU is idle for every host-side stage: the parameter fill,
+    the result extraction, and -- in a service -- the JSON encoding of the
+    previous answer.  Measured on a world grid that left the card busy about a
+    quarter of the time.
+
+    This runner splits a workload into fixed-width CHUNKS and gives each of
+    ``nstreams`` slots its OWN device buffers, its own page-locked host staging
+    and its own stream.  While chunk N's kernels run, chunk N+1's parameters
+    are already crossing the bus and chunk N-1's results are being consumed on
+    the host.  Ordering is by per-slot CUDA events; there is no
+    ``deviceSynchronize`` in the steady-state loop, which is the whole point --
+    a single sync anywhere serialises every stream behind it.
+
+    THE STRIDE CONSTRAINT is the same one ``PipelinedLuffy`` documents:
+    ``raysview.cuh`` addresses /RAYS/ element ``o`` of thread ``t`` at
+    ``o * n + t``, so the SoA column stride IS the launch width.  Every slot is
+    therefore allocated at ``chunk`` and a short final chunk is padded up by
+    REPEATING a real parameter row -- never zeros, which would hang the
+    sample-area loop.  Only the real rows are handed back.
+
+    THE SHARED TABLES ARE UPLOADED ONCE for the whole run and shared by every
+    slot: the ionosphere because it depends only on (coefficients, month, SSN),
+    and the ANTENNAS because a job's /cantenna/ set is per-CELL, not per
+    circuit -- a grid revisits the same cell at every hour and frequency, so
+    one table serves the entire sweep instead of being re-sent per chunk.
+
+    ``on_chunk`` is how a caller keeps up.  It is invoked as
+    ``on_chunk(lo, hi, results, muf3)`` the moment a chunk lands, with the
+    results for ``params[lo:hi]`` -- so a service can reduce, encode or stream
+    that chunk while the next ones are still on the card.  Supply it and
+    nothing is accumulated (a monthly-median world sweep is 400,000
+    circuit-hours and there is no reason to hold all of it); omit it and
+    ``run`` returns the whole ``(LuffyResults, muf3)`` as ``SetupLuffy`` does.
+
+    Usage::
+
+        pipe = PipelinedSetupLuffy(8192, 3, slots, iono)
+        pipe.run(params, cfgs, ant, ant_idx, on_chunk=reduce_into_grid)
+    """
+
+    def __init__(self, chunk, nstreams, slots=None, iono=None, block=32,
+                 pinned=True, fast_math=False):
+        import cupy as cp
+
+        self.chunk = int(chunk)
+        self.ns = max(1, int(nstreams))
+        self.block = int(block)
+        self.pinned = bool(pinned)
+        self._cp = cp
+        self._rt = cp.cuda.runtime
+        self._setup_fn = load_setup_kernel(fast_math).get_function(
+            "setup_batch")
+        self._luffy_fn = load_kernel(fast_math=fast_math).get_function(
+            "luffy_batch")
+        self._grid = ((self.chunk + self.block - 1) // self.block,)
+        self._gather = _xfer("gather_words")
+        self._resmap = _device_map("result", _RESULT_MAP)
+
+        # The ionosphere and the antennas are BOTH per-run here, unlike
+        # SetupLuffy where the ionosphere is resident.  A long-lived service
+        # rig has to serve whatever month/SSN/coefficient set the next request
+        # names, and the whole REDMAP + VIRTIM block is under 100 KB, so
+        # re-uploading it per job costs nothing worth keeping state for.
+        # `_iono_key` skips even that when consecutive jobs share one.
+        self._iono_dev = None
+        self._setup_shared = None
+        self._iono_key = None
+        self._ant = None
+        self._ant_args = None
+        if slots is not None and iono is not None:
+            self.set_ionosphere(slots, iono)
+
+        # per-slot device + pinned staging, zeroed once
+        self.streams, self.events = [], []
+        self.d_circ, self.d_soa, self.d_status = [], [], []
+        self.d_ipflag, self.d_muf3, self.d_prm = [], [], []
+        self.d_ai, self.d_cfg, self.d_gath = [], [], []
+        self.d_ii = []
+        self.p_prm, self.p_ai, self.p_gath = [], [], []
+        self.p_status, self.p_muf3, self.p_ii = [], [], []
+        self._rays = []
+        pw = SETUP_PARAMS_DTYPE.itemsize // 4
+        for _ in range(self.ns):
+            self.streams.append(cp.cuda.Stream(non_blocking=True))
+            self.events.append(cp.cuda.Event(disable_timing=True))
+            self.d_circ.append(cp.zeros(self.chunk * CIRCUIT_DTYPE.itemsize,
+                                        np.uint8))
+            soa = cp.zeros((_RAYS_WORDS, self.chunk), np.int32)
+            self.d_soa.append(soa)
+            self.d_status.append(cp.full(self.chunk, -1, np.int32))
+            self.d_ipflag.append(cp.zeros(self.chunk, np.int32))
+            self.d_muf3.append(cp.zeros((self.chunk, 3), np.float32))
+            self.d_prm.append(cp.zeros((self.chunk, pw), np.int32))
+            self.d_ai.append(cp.zeros(self.chunk, np.int32))
+            # LUFFY's iono_idx is the SetupParams `iono` column, but it has to
+            # reach the kernel as a CONTIGUOUS int array -- a strided column
+            # view of the parameter block is not one.
+            self.d_ii.append(cp.zeros(self.chunk, np.int32))
+            self.d_cfg.append(None)
+            self.d_gath.append(cp.empty((self.chunk, _RESULT_WORDS), np.int32))
+            self.p_prm.append(self._host((self.chunk, pw), np.int32))
+            self.p_ai.append(self._host(self.chunk, np.int32))
+            self.p_ii.append(self._host(self.chunk, np.int32))
+            self.p_gath.append(self._host((self.chunk, _RESULT_WORDS),
+                                          np.int32))
+            self.p_status.append(self._host(self.chunk, np.int32))
+            self.p_muf3.append(self._host((self.chunk, 3), np.float32))
+            self._rays.append(_rays_views(soa))
+
+    def _host(self, shape, dtype):
+        """Page-locked staging, so the copies can actually overlap compute."""
+        n = int(np.prod(shape))
+        if not self.pinned:
+            return np.empty(shape, dtype)
+        mem = self._cp.cuda.alloc_pinned_memory(n * np.dtype(dtype).itemsize)
+        return np.frombuffer(mem, dtype, n).reshape(shape)
+
+    def set_ionosphere(self, slots, iono, key=None):
+        """Install the REDMAP + VIRTIM tables for the next run.
+
+        ``key`` lets a caller skip a redundant re-upload when the next job
+        names the same (coefficients, month, SSN); pass anything hashable that
+        identifies the table set, or None to always upload.
+        """
+        cp = self._cp
+        if key is not None and key == self._iono_key:
+            return self
+        st = setup_iono_tables(slots)
+        d = {k: cp.asarray(v) for k, v in iono.items()}
+        s = {k: cp.asarray(v) for k, v in st.items()}
+        self._tables = (d, s)                    # keep the copies alive
+        self._iono_dev = d
+        self._setup_shared = (s["ab"], s["ikim"], s["anew"], s["bnew"],
+                              s["achi"], s["bchi"], d["fakp"], d["fakmap"],
+                              d["hmym"], d["fakabp"], d["abmap"], s["f2d"],
+                              s["month"], s["ssn"])
+        self._iono_key = key
+        return self
+
+    def set_antennas(self, ant):
+        cp = self._cp
+        a = {k: cp.asarray(v) for k, v in ant.items() if k != "numants"}
+        self._ant = a
+        self._ant_args = (a["array"], a["aeff"], a["iats"], a["xfqs"],
+                          a["xfqe"], a["offazim"], a["pwrdba"],
+                          np.int32(ant["numants"]))
+        return self
+
+    def _h2d(self, dst, src, stream):
+        self._rt.memcpyAsync(dst.data.ptr, src.ctypes.data, src.nbytes,
+                             self._rt.memcpyHostToDevice, stream.ptr)
+
+    def _d2h(self, dst, src, stream):
+        self._rt.memcpyAsync(dst.ctypes.data, src.data.ptr, dst.nbytes,
+                             self._rt.memcpyDeviceToHost, stream.ptr)
+
+    def _enqueue(self, slot, c):
+        """Every device stage of one chunk, async, on this slot's stream."""
+        cp = self._cp
+        st = self.streams[slot]
+        d = self._iono_dev
+        chunk = self.chunk
+        d_nang, d_ang, d_ifob = self._rays[slot]
+        with st:
+            self._h2d(self.d_prm[slot], self.p_prm[slot], st)
+            self._h2d(self.d_ai[slot], self.p_ai[slot], st)
+            self._h2d(self.d_ii[slot], self.p_ii[slot], st)
+            self.d_status[slot].fill(-1)
+            self._setup_fn(self._grid, (self.block,), (
+                self.d_circ[slot], d_nang, d_ang, self.d_ipflag[slot],
+                self.d_muf3[slot], self.d_prm[slot], self.d_cfg[slot])
+                + self._setup_shared + (np.int32(chunk),))
+            self._luffy_fn(self._grid, (self.block,), (
+                self.d_circ[slot], d_nang, d_ang, d_ifob,
+                self.d_ipflag[slot], self.d_ii[slot],
+                self.d_ai[slot],
+                d["fam"], d["dud"], d["fakp"], d["fakmap"], d["hmym"],
+                d["fakabp"], d["abmap"], d["sys"], d["perr"], d["f2d111"])
+                + self._ant_args + (self.d_status[slot], np.int32(chunk)))
+            rtot = _RESULT_WORDS * chunk
+            self._gather(((rtot + 255) // 256,), (256,),
+                         (self.d_circ[slot].view(np.int32), self.d_gath[slot],
+                          self._resmap, I32(_RESULT_WORDS), I32(_CIRC_WORDS),
+                          np.int64(rtot)))
+            self._d2h(self.p_gath[slot], self.d_gath[slot], st)
+            self._d2h(self.p_status[slot], self.d_status[slot], st)
+            self._d2h(self.p_muf3[slot], self.d_muf3[slot], st)
+        self.events[slot].record(st)
+
+    def _stage(self, slot, params, iono_idx, ant_idx, a, b):
+        """Fill this slot's pinned staging; pad a short chunk by repetition."""
+        c = b - a
+        pw = SETUP_PARAMS_DTYPE.itemsize // 4
+        words = params.view(np.int32).reshape(-1, pw)
+        self.p_prm[slot][:c] = words[a:b]
+        self.p_ai[slot][:c] = ant_idx[a:b]
+        self.p_ii[slot][:c] = iono_idx[a:b]
+        if c < self.chunk:
+            # REPEAT a real row: a zeroed layers.km hangs the area loop, so the
+            # padding lanes have to describe a legal circuit even though their
+            # answer is discarded.
+            self.p_prm[slot][c:] = self.p_prm[slot][0]
+            self.p_ai[slot][c:] = self.p_ai[slot][0]
+            self.p_ii[slot][c:] = self.p_ii[slot][0]
+        return c
+
+    def _harvest(self, slot, a, b):
+        """This slot's results OUT of the pinned staging, as owned arrays.
+
+        The staging is reused by the next chunk the moment this returns, so
+        nothing handed back may alias it.  The block is therefore COPIED here
+        rather than leaning on ``_split_results``'s per-column
+        ``ascontiguousarray``: those calls copy a strided slice of a wider
+        block *usually*, but a slice of shape ``(1, k)`` is already
+        C-contiguous whatever its row stride, so a single-row chunk got a VIEW
+        and the next chunk overwrote the answer underneath it.  That is not
+        hypothetical -- the assert below caught it on a one-circuit request.
+        """
+        c = b - a
+        gath = np.array(self.p_gath[slot][:c])          # owned, not pinned
+        son, xluf, jmode = _split_results(gath, c)
+        for arr, what in ((son, "son"), (xluf, "xluf"), (jmode, "jmode")):
+            assert not np.shares_memory(arr, self.p_gath[slot]), (
+                f"{what} still aliases the pinned staging buffer")
+        res = LuffyResults(son, xluf, jmode,
+                           np.array(self.p_status[slot][:c], I32))
+        return res, np.array(self.p_muf3[slot][:c])
+
+    def run(self, params, cfgs, ant, ant_idx, on_chunk=None):
+        """A whole workload, chunked and overlapped across the streams.
+
+        Returns ``(LuffyResults, muf3)`` for the whole workload, or ``None``
+        when ``on_chunk`` is supplied (the caller consumed each chunk as it
+        landed and nothing was kept).
+        """
+        cp = self._cp
+        params = np.ascontiguousarray(params)
+        assert params.dtype == SETUP_PARAMS_DTYPE, params.dtype
+        cfgs = np.ascontiguousarray(cfgs)
+        assert cfgs.dtype == SETUP_CONFIG_DTYPE, cfgs.dtype
+        ant_idx = np.ascontiguousarray(ant_idx, I32)
+        n = params.shape[0]
+        assert ant_idx.shape[0] == n, (ant_idx.shape, n)
+        assert int(params["cfg"].max(initial=0)) < cfgs.shape[0], (
+            "a SetupParams references a config slot that was not supplied")
+        assert self._setup_shared is not None, (
+            "no ionosphere: pass slots/iono to the constructor or call "
+            "set_ionosphere")
+        self.set_antennas(ant)
+        d_cfg = cp.asarray(cfgs.view(np.uint8).ravel())
+        for k in range(self.ns):
+            self.d_cfg[k] = d_cfg          # tiny and read-only: shared
+        iono_idx = np.ascontiguousarray(params["iono"], I32)
+
+        bounds = [(a, min(a + self.chunk, n))
+                  for a in range(0, n, self.chunk)]
+        keep = [] if on_chunk is None else None
+        inflight = {}                       # slot -> (a, b) awaiting harvest
+        for k, (a, b) in enumerate(bounds):
+            slot = k % self.ns
+            if slot in inflight:            # reuse: drain that slot first
+                pa, pb = inflight.pop(slot)
+                self.events[slot].synchronize()
+                out = self._harvest(slot, pa, pb)
+                if on_chunk is None:
+                    keep.append((pa, pb) + out)
+                else:
+                    on_chunk(pa, pb, out[0], out[1])
+            self._stage(slot, params, iono_idx, ant_idx, a, b)
+            self._enqueue(slot, b - a)
+            inflight[slot] = (a, b)
+        for slot in sorted(inflight, key=lambda s: inflight[s][0]):
+            a, b = inflight[slot]
+            self.events[slot].synchronize()
+            out = self._harvest(slot, a, b)
+            if on_chunk is None:
+                keep.append((a, b) + out)
+            else:
+                on_chunk(a, b, out[0], out[1])
+        if on_chunk is not None:
+            return None
+
+        keep.sort(key=lambda t: t[0])
+        son = np.empty(n, SON_DTYPE)
+        xluf = np.empty((n, _RESULT_COLS["muf.xluf"][1]), F32)
+        jmode = np.empty(n, I32)
+        status = np.empty(n, I32)
+        muf3 = np.empty((n, 3), F32)
+        for a, b, res, m3 in keep:
+            son[a:b] = res.son
+            xluf[a:b] = res.xluf
+            jmode[a:b] = res.jmode
+            status[a:b] = res.status
+            muf3[a:b] = m3
+        return LuffyResults(son, xluf, jmode, status), muf3
