@@ -1,0 +1,2 @@
+# Nsight Compute reports (large, machine-specific)
+*.ncu-rep

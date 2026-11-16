@@ -12,6 +12,7 @@
 #ifndef VOACAP_FOBBY_CUH
 #define VOACAP_FOBBY_CUH
 
+#include "angcos.cuh"
 #include "constants.cuh"
 #include "f32math.cuh"
 #include "raysview.cuh"
@@ -24,8 +25,9 @@ __device__ inline void fobby(const LayerState* state, const RaysView& rays,
     const float* htrue = state->htrue;
     int nang = rv_nang(rays);
     for (int ia = 1; ia <= nang; ++ia) {        // DO 650 IA=1,NANG
-        float del_ = rv_ang(rays, ia) * VC_D2R;
-        float rcosd = VC_RZ * cos32(del_);
+        float ang = rv_ang(rays, ia);
+        float del_ = ang * VC_D2R;
+        float rcosd = VC_RZ * cos32_deg(ang, del_);     // cos32(del_)
         for (int ih = 1; ih < 31; ++ih) {       // DO 645 IH=1,30
             float fv = fvert[ih * 6 + k];
             // true height so no K factor

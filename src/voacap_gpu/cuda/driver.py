@@ -412,12 +412,13 @@ SETUP_BYTES_PER_THREAD = SETUP_PARAMS_DTYPE.itemsize
 
 # setup.cuh's device-side hour guard: a row whose hour is outside 1..24 is
 # not built (IPFLAG comes back SETUP_IPFLAG_REFUSED) and LUFFY reports it as
-# SETUP_STATUS_BAD_HOUR -- 3, the out-of-bounds-table-read code GAIN already
-# uses, since Stage A raises IndexError on such an hour.  The host check in
-# `_check_setup_params` refuses these rows before launch; the guard is the
-# defence in depth for a caller that bypasses it.
+# SETUP_STATUS_BAD_HOUR -- 1301, VC_ST_SETUP_HOUR_OOB in the global status
+# table (cuda/kernels/status.cuh; engine.STATUS_SETUP_HOUR), since Stage A
+# raises IndexError on such an hour.  The host check in `_check_setup_params`
+# refuses these rows before launch; the guard is the defence in depth for a
+# caller that bypasses it.
 SETUP_IPFLAG_REFUSED = -1
-SETUP_STATUS_BAD_HOUR = 3
+SETUP_STATUS_BAD_HOUR = 1301
 
 
 def _require_dtype(arr, dtype, what):
@@ -733,13 +734,14 @@ _KERNEL_SRC = r'''
 
 // setup.cuh's hour guard hands LUFFY this IPFLAG for a circuit it refused to
 // build; no legal IPFLAG is negative.  Such a row is answered with status
-// VC_STATUS_TABLE_OOB and LUFFY never runs on its (unbuilt) state.  The
+// VC_STATUS_TABLE_OOB (VC_ST_SETUP_HOUR_OOB in the global status table,
+// kernels/status.cuh) and LUFFY never runs on its (unbuilt) state.  The
 // values must match setup.cuh's; both are guarded so either may come first.
 #ifndef VC_IPFLAG_REFUSED
 #define VC_IPFLAG_REFUSED   (-1)
 #endif
 #ifndef VC_STATUS_TABLE_OOB
-#define VC_STATUS_TABLE_OOB 3
+#define VC_STATUS_TABLE_OOB VC_ST_SETUP_HOUR_OOB
 #endif
 
 extern "C" __global__ void luffy_batch(
@@ -761,11 +763,33 @@ extern "C" __global__ void luffy_batch(
         status[i] = VC_STATUS_TABLE_OOB;
         return;
     }
-    status[i] = luffy(&circ[i], rays_nang, rays_ang, rays_ifob, n, i,
+    VC_PROF_BEGIN(VC_PROF_KERNEL);
+    // THE STATE RUNS IN LOCAL MEMORY.  circ[] is array-of-structures, so a
+    // warp's 32 lanes reading the same field touch 32 lines 24,980 bytes
+    // apart; local memory is interleaved per 4-byte word across the warp, so
+    // the same access is one or two lines.  GENION's and SETTXR's table scans
+    // went 2-8x faster per thread.  The copy in and out is ~8% of a thread's
+    // time and moves every byte, so the whole-state semantics (fetch_luffy,
+    // the 7M-cell replay) are unchanged.  The cost is device memory: CUDA
+    // reserves local memory for EVERY thread slot of the device (sizeof(
+    // CircuitState) + the SmoothStore etc. ~= 29 KB x 1536 x SMs, ~3.5 GB on
+    // an 84-SM RTX 5080) once per context.  -DVC_LUFFY_GLOBAL_STATE restores
+    // the in-place form (~0.46 GB reserved, ~2x slower kernel).
+#ifndef VC_LUFFY_GLOBAL_STATE
+    CircuitState cl = circ[i];
+    CircuitState* cs = &cl;
+#else
+    CircuitState* cs = &circ[i];
+#endif
+    status[i] = luffy(cs, rays_nang, rays_ang, rays_ifob, n, i,
                       fam, dud, fakp, fakmap, hmym, fakabp, abmap,
                       sys, perr, f2d111, ant_array, ant_aeff, ant_iats,
                       ant_xfqs, ant_xfqe, ant_offazim, ant_pwrdba, numants,
                       iono_idx[i], ant_idx[i], ipflag[i]);
+#ifndef VC_LUFFY_GLOBAL_STATE
+    circ[i] = cl;
+#endif
+    VC_PROF_END(VC_PROF_KERNEL);
 }
 
 // ONE WARP PER CIRCUIT-HOUR, ONE LANE PER FREQUENCY (cuda/luffy_warp.cuh).
@@ -1188,6 +1212,216 @@ def fetch_results(state):
     status = cp.asnumpy(d_status)
     son, xluf, jmode = _split_results(host, n)
     return LuffyResults(son, xluf, jmode, status)
+
+
+# ---------------------------------------------------------------------------
+# SLIM OUTPUTS -- gather only the /SON/ columns (and slots) a caller reads
+# ---------------------------------------------------------------------------
+# ``LuffyResults`` is the whole of /SON/ x 14 slots + XLUF + JMODE: 1,696
+# bytes a circuit-hour, ~670 MB for a 2-degree monthly-median world sweep.  A
+# map service reads four or six of those 28 columns, at the 9-11 slots that
+# carry its frequencies.  ``outputs=`` names the columns; the device gathers
+# exactly those words (same ``gather_words`` kernel, a different word map) and
+# only they cross the bus.  It is an integer word copy, so a slim column is
+# BIT-IDENTICAL to the same column of the full result by construction --
+# ``tests/cuda/test_slim_outputs.py`` checks it anyway.
+#
+# SLOT INDEXING IS PRESERVED: a slim column has ``nslots`` entries and entry k
+# IS /SON/ slot k, for k < nslots.  So ``res.son["sndb"][:, 1:1 + nf]`` means
+# the same thing on a slim result as on a full one, and a caller's column
+# extraction does not change.  ``nslots`` defaults to the slots the configs
+# actually use -- slot 0 up to the highest user frequency (``frel[1..11]``);
+# pass ``slots=13`` to keep slot 12, LUFFY's MUF slot, as well.
+
+SLIM_EXTRA = ("xluf", "jmode")               # outside /SON/, opt-in by name
+SLIM_ALWAYS = ("status", "muf3")             # always returned; accepted, ignored
+_SON_SLOTS = SON_DTYPE["sndb"].shape[0]      # 14
+_SON_BASE = _span(CIRCUIT_DTYPE, "son")[0]
+_USER_FREQ_SLOTS = 11                        # frel[1..11]; [12] is the MUF
+
+
+def slots_in_use(cfgs):
+    """1 + the highest /SON/ slot any config puts a user frequency in.
+
+    ``setup_config`` puts frequency j at ``frel[j + 1]`` and LUFFY skips a
+    slot whose ``frel`` is not positive, so slots above this carry nothing a
+    caller asked for.  Slot 0 is kept so slot k stays column k.
+    """
+    frel = np.asarray(cfgs["frel"], F32).reshape(-1, cfgs["frel"].shape[-1])
+    used = frel[:, 1:1 + _USER_FREQ_SLOTS] > 0
+    hi = 0
+    if used.any():
+        hi = 1 + int(np.flatnonzero(used.any(axis=0)).max())
+    return 1 + hi
+
+
+class SlimSpec:
+    """What a slim run gathers: the word map, and how to decode it.
+
+    ``son_fields`` are /SON/ leaves, ``extra`` a subset of ``SLIM_EXTRA``,
+    ``nslots`` the leading slots kept of every 14-slot column.  The gathered
+    row is laid out as ``row_dtype`` -- the son fields in the order given,
+    then XLUF, then JMODE -- so the host decode is a ``view``, not a copy.
+    """
+
+    __slots__ = ("son_fields", "extra", "nslots", "son_dtype", "row_dtype",
+                 "map", "words", "key")
+
+    def __init__(self, outputs, nslots):
+        nslots = int(nslots)
+        if not 1 <= nslots <= _SON_SLOTS:
+            raise ValueError(f"slots must be 1..{_SON_SLOTS}, got {nslots}")
+        names = [str(o) for o in outputs]
+        if len(set(names)) != len(names):
+            raise ValueError(f"outputs names a field twice: {names}")
+        bad = [o for o in names if o not in SON_DTYPE.names
+               and o not in SLIM_EXTRA and o not in SLIM_ALWAYS]
+        if bad:
+            raise ValueError(
+                f"unknown output(s) {bad}: expected /SON/ fields "
+                f"{SON_DTYPE.names}, or {SLIM_EXTRA}")
+        self.son_fields = tuple(o for o in names if o in SON_DTYPE.names)
+        self.extra = tuple(o for o in SLIM_EXTRA if o in names)
+        self.nslots = nslots
+        sdt, idx = [], []
+        for f in self.son_fields:
+            sub, off = SON_DTYPE.fields[f][0], SON_DTYPE.fields[f][1]
+            w0 = _SON_BASE + off // 4
+            if sub.shape:                     # a 14-slot column
+                sdt.append((f, sub.base, (nslots,)))
+                idx.append(np.arange(w0, w0 + nslots, dtype=I32))
+            else:                             # d10r .. d90s: one word
+                sdt.append((f, sub))
+                idx.append(np.array([w0], I32))
+        self.son_dtype = np.dtype(sdt) if sdt else None
+        rdt = list(sdt)
+        if "xluf" in self.extra:
+            s, ln = _span(CIRCUIT_DTYPE, "muf.xluf")
+            rdt.append(("xluf", F32, (ln,)))
+            idx.append(np.arange(s, s + ln, dtype=I32))
+        if "jmode" in self.extra:
+            s, _ln = _span(CIRCUIT_DTYPE, "frq.jmode")
+            rdt.append(("jmode", I32))
+            idx.append(np.array([s], I32))
+        self.row_dtype = np.dtype(rdt) if rdt else None
+        self.map = (np.concatenate(idx).astype(I32) if idx
+                    else np.zeros(0, I32))
+        self.words = int(self.map.size)
+        assert self.row_dtype is None or self.row_dtype.itemsize == 4 * self.words
+        assert self.words <= _RESULT_WORDS
+        self.key = ("slim", self.son_fields, self.extra, nslots)
+
+    @property
+    def bytes_per_row(self):
+        """What crosses the bus per circuit-hour: the words + status + muf3."""
+        return 4 * self.words + 4 + 12
+
+    def decode(self, block, status):
+        """An OWNED ``(c, words)`` int32 block + status -> ``SlimResults``."""
+        c = block.shape[0]
+        son = xluf = jmode = None
+        if self.row_dtype is not None:
+            rows = np.ascontiguousarray(block).view(self.row_dtype).reshape(c)
+            if not self.extra:
+                son = rows                       # zero-copy: the block IS son
+            else:
+                if self.son_fields:
+                    son = np.empty(c, self.son_dtype)
+                    for f in self.son_fields:
+                        son[f] = rows[f]
+                if "xluf" in self.extra:
+                    xluf = np.ascontiguousarray(rows["xluf"])
+                if "jmode" in self.extra:
+                    jmode = np.ascontiguousarray(rows["jmode"])
+        return SlimResults(son, xluf, jmode, status, self)
+
+
+def slim_spec(outputs, cfgs=None, slots=None):
+    """``outputs`` (+ the configs, for the slot count) -> a ``SlimSpec``."""
+    if isinstance(outputs, str):
+        outputs = (outputs,)
+    if slots is None:
+        slots = _SON_SLOTS if cfgs is None else slots_in_use(cfgs)
+    return SlimSpec(tuple(outputs), slots)
+
+
+class SlimResults(LuffyResults):
+    """A slim ``LuffyResults``: only the columns named in ``outputs=``.
+
+    son:    (N,) structured array of JUST the requested /SON/ fields, each a
+            ``(nslots,)`` column whose entry k is /SON/ slot k -- or None
+    xluf:   (N, 25) float32 if ``"xluf"`` was requested, else None
+    jmode:  (N,) int32 if ``"jmode"`` was requested, else None
+    status: (N,) int32, always
+    """
+
+    __slots__ = ("spec",)
+
+    def __init__(self, son, xluf, jmode, status, spec):
+        super().__init__(son, xluf, jmode, status)
+        self.spec = spec
+
+    @property
+    def nslots(self):
+        return self.spec.nslots
+
+    def take(self, lo, hi):
+        """Rows ``[lo, hi)`` as an owned SlimResults (for a padded batch)."""
+        def cut(a):
+            return None if a is None else a[lo:hi]
+        return SlimResults(cut(self.son), cut(self.xluf), cut(self.jmode),
+                           self.status[lo:hi], self.spec)
+
+
+def _gather_slim(d_circ, spec, n, rows=None):
+    """Device gather of ``spec``'s words for the first ``rows`` of n states."""
+    import cupy as cp
+    rows = n if rows is None else rows
+    gath = cp.empty((rows, spec.words), np.int32)
+    tot = spec.words * rows
+    if tot:
+        _xfer("gather_words")(((tot + 255) // 256,), (256,),
+                              (d_circ.view(np.int32), gath,
+                               _device_map(spec.key, spec.map),
+                               I32(spec.words), I32(_CIRC_WORDS),
+                               np.int64(tot)))
+    return gath
+
+
+def fetch_slim_results(state, spec, rows=None):
+    """``fetch_results`` restricted to ``spec`` -> ``SlimResults``.
+
+    ``rows`` limits the transfer to the first ``rows`` circuits (a padded
+    batch's real rows); the padding never crosses the bus.
+    """
+    import cupy as cp
+    d_circ, _d_soa, d_status, n = state
+    cp.cuda.runtime.deviceSynchronize()
+    rows = n if rows is None else int(rows)
+    host = cp.asnumpy(_gather_slim(d_circ, spec, n, rows))
+    status = cp.asnumpy(d_status[:rows])
+    return spec.decode(host, status)
+
+
+# What a GRID REDUCTION reads straight out of a device CircuitState: the word
+# offset of slot 0 of the four /SON/ columns PropServer aggregates, and the
+# state stride.  gridjob.DeviceCellReducer takes these (or a synthetic block's
+# own) so the reduction never needs a gather at all.
+GRID_SON_FIELDS = ("sndb", "dbw", "dbu", "reliab")
+GRID_SON_OFFSETS = tuple(_span(CIRCUIT_DTYPE, f"son.{f}")[0]
+                         for f in GRID_SON_FIELDS)
+CIRCUIT_WORDS = _CIRC_WORDS
+
+_GRIDREDUCE_SRC = r'''
+#include "gridreduce.cuh"
+'''
+
+
+def load_gridreduce_kernel():
+    """Compile (once) cuda/kernels/gridreduce.cuh: ``grid_reduce_chunk`` and
+    ``grid_finalise``.  Pure binary64 compare/add/divide under the strict
+    option set (no FMA contraction), so it is exact against numpy float64."""
+    return load(_GRIDREDUCE_SRC)
 
 
 def launch_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
@@ -1782,6 +2016,7 @@ class SetupLuffy:
         self._d_prm = cp.zeros(self.n * SETUP_PARAMS_DTYPE.itemsize, np.uint8)
         self._d_ai = cp.zeros(self.n, np.int32)
         self._d_cfg = None                       # sized on first submission
+        self._last_cfgs = None
 
         # shared read-only tables — one copy for the object's lifetime.  The
         # IONOSPHERE is resident because it is big (REDMAP's maps) and depends
@@ -1900,6 +2135,7 @@ class SetupLuffy:
         self._d_ii.set(np.ascontiguousarray(params["iono"], I32))
         self._d_ai.set(np.ascontiguousarray(ant_idx, I32))
         self._d_status.fill(-1)
+        self._last_cfgs = cfgs                   # for a slim fetch's slots
         return self
 
     def launch_setup(self):
@@ -1922,17 +2158,33 @@ class SetupLuffy:
         """setup_batch, then luffy_batch, over the resident buffers."""
         return self.launch_setup().launch_kernel()
 
-    def results(self):
-        """``(LuffyResults, muf3)`` — muf3 is (n, 3): ALLMUF, FOT, HPF at IT."""
-        res = fetch_results(self.state)
-        return res, self._cp.asnumpy(self._d_muf3)
+    def results(self, outputs=None, slots=None, rows=None):
+        """``(LuffyResults, muf3)`` — muf3 is (n, 3): ALLMUF, FOT, HPF at IT.
 
-    def run(self, params, cfgs, ant_idx, ant=None):
+        ``outputs`` (default None: the whole /SON/, XLUF and JMODE, as ever)
+        names the columns to gather instead -- see ``SlimSpec`` -- and returns
+        a ``SlimResults``; ``slots`` defaults to the slots the last uploaded
+        configs use.  ``rows`` limits a slim fetch to the first ``rows``.
+        """
+        if outputs is None:
+            res = fetch_results(self.state)
+            return res, self._cp.asnumpy(self._d_muf3)
+        spec = slim_spec(outputs, self._last_cfgs, slots)
+        rows = self.n if rows is None else int(rows)
+        res = fetch_slim_results(self.state, spec, rows)
+        return res, self._cp.asnumpy(self._d_muf3[:rows])
+
+    def run(self, params, cfgs, ant_idx, ant=None, outputs=None, slots=None):
         """A batch of ANY length <= n -> ``(LuffyResults, muf3)``.
 
         Short batches are padded up to ``n`` by REPEATING the first row (never
         zeros; see the class docstring) and the padding is dropped on the way
         out, so a caller never sees the fixed width.
+
+        ``outputs=("sndb", "dbw", ...)`` gathers and transfers only those
+        /SON/ columns (at the slots in use, or ``slots``) and returns a
+        ``SlimResults``; status and muf3 always come back.  The default,
+        None, is the full ``LuffyResults``, unchanged.
         """
         if ant is not None:
             self._install_antennas(ant)
@@ -1948,6 +2200,8 @@ class SetupLuffy:
             params = np.concatenate([params, np.repeat(params[:1], pad)])
             ant_idx = np.concatenate([ant_idx, np.repeat(ant_idx[:1], pad)])
         self._upload(params, cfgs, ant_idx).launch()
+        if outputs is not None:
+            return self.results(outputs, slots, rows=c)
         res, muf3 = self.results()
         if c == self.n:
             return res, muf3
@@ -2168,6 +2422,36 @@ class PipelinedSetupLuffy:
                 d["fam"], d["dud"], d["fakp"], d["fakmap"], d["hmym"],
                 d["fakabp"], d["abmap"], d["sys"], d["perr"], d["f2d111"])
                 + self._ant_args + (self.d_status[slot], np.int32(chunk)))
+            self._enqueue_results(slot, c, st)
+        self.events[slot].record(st)
+
+    # --- the result path: what leaves the card for one chunk ---------------
+
+    def _enqueue_results(self, slot, c, st):
+        """Gather + D2H (full or slim), and the optional grid reduction.
+
+        Full (``outputs=None``, no reducer): exactly the historic gather of
+        every result word and the three whole-chunk copies.  Slim: only the
+        spec's words, and only the ``c`` real rows of each copy.  A reducer
+        consumes the chunk ON THE DEVICE, straight out of ``d_circ``; its
+        kernels are chained chunk-to-chunk by ``_red_prev`` so the
+        order-dependent scan sees the chunks in sweep order even though the
+        chunks themselves run on different streams.
+        """
+        spec, red = self._spec, self._reduce
+        if red is not None:
+            if self._red_prev is not None:
+                st.wait_event(self._red_prev)
+            lo = red.offset + self._cur[0]
+            red.enqueue_chunk(self.d_circ[slot].view(np.int32), CIRCUIT_WORDS,
+                              GRID_SON_OFFSETS, self.d_status[slot], lo, c, st)
+            ev = self._red_events[slot]
+            ev.record(st)
+            self._red_prev = ev
+        if spec is None:
+            if red is not None:
+                return                   # reduce-only: nothing leaves the card
+            chunk = self.chunk
             rtot = _RESULT_WORDS * chunk
             self._gather(((rtot + 255) // 256,), (256,),
                          (self.d_circ[slot].view(np.int32), self.d_gath[slot],
@@ -2176,7 +2460,19 @@ class PipelinedSetupLuffy:
             self._d2h(self.p_gath[slot], self.d_gath[slot], st)
             self._d2h(self.p_status[slot], self.d_status[slot], st)
             self._d2h(self.p_muf3[slot], self.d_muf3[slot], st)
-        self.events[slot].record(st)
+            return
+        m = spec.words
+        if m:
+            d_g = self.d_gath[slot].ravel()[:c * m].reshape(c, m)
+            tot = m * c
+            self._gather(((tot + 255) // 256,), (256,),
+                         (self.d_circ[slot].view(np.int32), d_g,
+                          _device_map(spec.key, spec.map), I32(m),
+                          I32(_CIRC_WORDS), np.int64(tot)))
+            self._d2h(self.p_gath[slot].reshape(-1)[:c * m].reshape(c, m),
+                      d_g, st)
+        self._d2h(self.p_status[slot][:c], self.d_status[slot][:c], st)
+        self._d2h(self.p_muf3[slot][:c], self.d_muf3[slot][:c], st)
 
     def _stage(self, slot, params, iono_idx, ant_idx, a, b):
         """Fill this slot's pinned staging; pad a short chunk by repetition."""
@@ -2208,6 +2504,17 @@ class PipelinedSetupLuffy:
         hypothetical -- the assert below caught it on a one-circuit request.
         """
         c = b - a
+        spec = self._spec
+        if spec is not None:
+            # slim: the chunk landed as a (c, words) prefix of the staging
+            m = spec.words
+            gath = np.array(self.p_gath[slot].reshape(-1)[:c * m]
+                            ).reshape(c, m)                # owned, not pinned
+            res = spec.decode(gath, np.array(self.p_status[slot][:c], I32))
+            for arr in (res.son, res.xluf, res.jmode):
+                assert arr is None or not np.shares_memory(
+                    arr, self.p_gath[slot]), "slim result aliases staging"
+            return res, np.array(self.p_muf3[slot][:c])
         gath = np.array(self.p_gath[slot][:c])          # owned, not pinned
         son, xluf, jmode = _split_results(gath, c)
         for arr, what in ((son, "son"), (xluf, "xluf"), (jmode, "jmode")):
@@ -2217,13 +2524,46 @@ class PipelinedSetupLuffy:
                            np.array(self.p_status[slot][:c], I32))
         return res, np.array(self.p_muf3[slot][:c])
 
-    def run(self, params, cfgs, ant, ant_idx, on_chunk=None):
+    def run(self, params, cfgs, ant, ant_idx, on_chunk=None, outputs=None,
+            slots=None, reduce=None):
         """A whole workload, chunked and overlapped across the streams.
 
         Returns ``(LuffyResults, muf3)`` for the whole workload, or ``None``
         when ``on_chunk`` is supplied (the caller consumed each chunk as it
         landed and nothing was kept).
+
+        ``outputs`` (default None: everything, as before) names the /SON/
+        columns to bring back -- e.g. ``("sndb", "dbw", "dbu", "reliab",
+        "nhp", "mode")``, optionally ``"xluf"`` / ``"jmode"`` -- and only
+        those words, at the slots in use (``slots_in_use(cfgs)``, or
+        ``slots``), are gathered and copied.  Results, including what
+        ``on_chunk`` receives, are then ``SlimResults``; status and muf3
+        always come back.  ``outputs=()`` brings back status and muf3 only.
+
+        ``reduce`` is a ``gridjob.DeviceCellReducer``: each chunk is reduced
+        into its per-cell state ON THE DEVICE, in sweep order.  With
+        ``outputs=None`` nothing per-row crosses the bus at all; ``on_chunk``,
+        if given, is then called as ``on_chunk(lo, hi, None, None)`` (for
+        progress) and ``run`` returns None -- read the answer with
+        ``reduce.finalise()``.  Give ``outputs`` too and ``on_chunk`` gets
+        those slim rows as well.
         """
+        cp = self._cp
+        spec = None if outputs is None else slim_spec(outputs, cfgs, slots)
+        if spec is not None:
+            _device_map(spec.key, spec.map)     # upload before the drain below
+        if reduce is not None:
+            if not hasattr(self, "_red_events"):
+                self._red_events = [cp.cuda.Event(disable_timing=True)
+                                    for _ in range(self.ns)]
+        self._spec, self._reduce, self._red_prev = spec, reduce, None
+        try:
+            out = self._run(params, cfgs, ant, ant_idx, on_chunk, spec, reduce)
+        finally:
+            self._spec, self._reduce, self._red_prev = None, None, None
+        return out
+
+    def _run(self, params, cfgs, ant, ant_idx, on_chunk, spec, reduce):
         cp = self._cp
         params = np.ascontiguousarray(params)
         _require_dtype(params, SETUP_PARAMS_DTYPE, "params")
@@ -2253,7 +2593,12 @@ class PipelinedSetupLuffy:
 
         bounds = [(a, min(a + self.chunk, n))
                   for a in range(0, n, self.chunk)]
-        keep = [] if on_chunk is None else None
+        # reduce-only: nothing per-row comes back, so there is nothing to keep
+        # or harvest -- a chunk is "landed" when its event fires.
+        quiet = reduce is not None and spec is None
+        harvest = ((lambda slot, a, b: (None, None)) if quiet
+                   else self._harvest)
+        keep = [] if (on_chunk is None and not quiet) else None
         inflight = {}                       # slot -> (a, b) awaiting harvest
         try:
             for k, (a, b) in enumerate(bounds):
@@ -2261,29 +2606,34 @@ class PipelinedSetupLuffy:
                 if slot in inflight:        # reuse: drain that slot first
                     pa, pb = inflight.pop(slot)
                     self.events[slot].synchronize()
-                    out = self._harvest(slot, pa, pb)
-                    if on_chunk is None:
+                    out = harvest(slot, pa, pb)
+                    if keep is not None:
                         keep.append((pa, pb) + out)
-                    else:
+                    elif on_chunk is not None:
                         on_chunk(pa, pb, out[0], out[1])
                 self._stage(slot, params, iono_idx, ant_idx, a, b)
+                self._cur = (a, b)
                 self._enqueue(slot, b - a)
                 inflight[slot] = (a, b)
             for slot in sorted(inflight, key=lambda s: inflight[s][0]):
                 a, b = inflight[slot]
                 self.events[slot].synchronize()
-                out = self._harvest(slot, a, b)
+                out = harvest(slot, a, b)
                 del inflight[slot]
-                if on_chunk is None:
+                if keep is not None:
                     keep.append((a, b) + out)
-                else:
+                elif on_chunk is not None:
                     on_chunk(a, b, out[0], out[1])
         finally:
             _quiesce(self.events, inflight)
-        if on_chunk is not None:
+        if reduce is not None:
+            reduce.advance(n)
+        if keep is None:
             return None
 
         keep.sort(key=lambda t: t[0])
+        if spec is not None:
+            return self._assemble_slim(spec, n, keep)
         son = np.empty(n, SON_DTYPE)
         xluf = np.empty((n, _RESULT_COLS["muf.xluf"][1]), F32)
         jmode = np.empty(n, I32)
@@ -2296,3 +2646,23 @@ class PipelinedSetupLuffy:
             status[a:b] = res.status
             muf3[a:b] = m3
         return LuffyResults(son, xluf, jmode, status), muf3
+
+    @staticmethod
+    def _assemble_slim(spec, n, keep):
+        """The slim chunks -> one whole-workload ``(SlimResults, muf3)``."""
+        son = None if spec.son_dtype is None else np.empty(n, spec.son_dtype)
+        xluf = (np.empty((n, _RESULT_COLS["muf.xluf"][1]), F32)
+                if "xluf" in spec.extra else None)
+        jmode = np.empty(n, I32) if "jmode" in spec.extra else None
+        status = np.empty(n, I32)
+        muf3 = np.empty((n, 3), F32)
+        for a, b, res, m3 in keep:
+            if son is not None:
+                son[a:b] = res.son
+            if xluf is not None:
+                xluf[a:b] = res.xluf
+            if jmode is not None:
+                jmode[a:b] = res.jmode
+            status[a:b] = res.status
+            muf3[a:b] = m3
+        return SlimResults(son, xluf, jmode, status, spec), muf3

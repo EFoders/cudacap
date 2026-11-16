@@ -79,7 +79,8 @@ def _assert_masked(r, invalid):
 @requires_cuda
 def test_kernel_refusal_reaches_results_through_predict(monkeypatch):
     """An area-coverage receive antenna (OFFAZIM == -999) is unported: GAIN
-    flags it (oob_flag 2) and GENOIS turns that into status 3 on the very
+    flags it (oob_flag 2) and GENOIS turns that into status 303
+    (STATUS_GENOIS_AREA_COVERAGE) on the very
     first frequency.  predict() must carry that status into Results, and the
     whole hour must be invalid.
 
@@ -95,12 +96,13 @@ def test_kernel_refusal_reaches_results_through_predict(monkeypatch):
     r = predict(LONDON, PARIS, freqs=[7.0, 14.0], month=6, ssn=100,
                 hours=[1, 13])
     assert r.status.dtype == np.int32 and r.status.shape == (2,)
-    assert np.all(r.status == 3), r.status
+    assert np.all(r.status == engine.STATUS_GENOIS_AREA_COVERAGE), r.status
     assert not r.valid.any()
     _assert_masked(r, ~r.valid)
     assert np.all(np.isnan(r.luf))
     rec = r.at(13, 14.0)
-    assert rec["status"] == 3 and rec["valid"] is False
+    assert rec["status"] == engine.STATUS_GENOIS_AREA_COVERAGE
+    assert rec["valid"] is False
 
 
 @requires_cuda
@@ -111,26 +113,26 @@ def test_status_from_predict_circuits_is_not_discarded(monkeypatch):
     def fake(circuits, ipflags, fast_math=False):
         circuits, status = real(circuits, ipflags, fast_math=fast_math)
         status = np.array(status, np.int32)
-        status[1] = 22
+        status[1] = engine.STATUS_LUFFY_BAD_NMODE2
         return circuits, status
 
     monkeypatch.setattr(engine, "predict_circuits", fake)
     r = predict(LONDON, PARIS, freqs=[7.0, 14.0], month=6, ssn=100,
                 hours=[1, 2, 3])
-    assert r.status.tolist() == [0, 22, 0]
+    assert r.status.tolist() == [0, engine.STATUS_LUFFY_BAD_NMODE2, 0]
     assert r.valid[[0, 2]].all() and not r.valid[1].any()
     _assert_masked(r, ~r.valid)
 
 
 @requires_cuda
 def test_sub_1mhz_is_a_refusal_not_zeros():
-    """The reported '0.5 MHz returns snr=0, dbw=0, status 0' was status 2 being
+    """The reported '0.5 MHz returns snr=0, dbw=0, status 0' was status 302 being
     thrown away: GENOIS's receive-antenna GAIN lookup leaves the table below
     1 MHz (Stage A raises IndexError there).  On a smoothing-band path the
     blend never runs, so even the slots before the refusal are not answers."""
     r, status, raw_nhp, raw_dbw = _run_direct(TOKYO, SYDNEY, [7.0, 14.0, 0.5],
                                               hours=[1, 12])
-    assert np.all(status == 2), status
+    assert np.all(status == engine.STATUS_GENOIS_GAIN_OOB), status
     assert np.all(raw_dbw[:, 2] == 0.0)          # the preset that looked real
     assert np.all(raw_nhp[:, 2] == -1)
     assert not r.valid.any()

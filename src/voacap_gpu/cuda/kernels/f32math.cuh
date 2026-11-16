@@ -41,8 +41,9 @@
 //   --prec-sqrt=true ``sqrtf`` is correctly rounded, and rounding a correctly
 //   rounded binary64 sqrt of an exactly-representable binary32 argument down
 //   to binary32 cannot double-round wrong (53 >= 2*24+2).  So this one is
-//   free: it drops a 1/64-rate f64 sqrt for zero error.  It is under the
-//   macro only so the default build keeps one single arithmetic convention.
+//   free: it drops a 1/64-rate f64 sqrt for zero error.  The STRICT build
+//   now uses it too (with the binary64 path's NaN bits for negative
+//   arguments; see sqrt32 below), proved over all 2^32 inputs.
 //
 // * ``div32``/``div64`` DO NOT CHANGE.  They are not transcendentals, and
 //   ``__fdiv_rn`` IS the IEEE f32 divide — there is no cheaper correct one,
@@ -85,7 +86,21 @@ __device__ __forceinline__ float atan32(float x) { return (float)atan((double)x)
 __device__ __forceinline__ float asin32(float x) { return (float)asin((double)x); }
 __device__ __forceinline__ float log32(float x)  { return (float)log((double)x); }      // ALOG
 __device__ __forceinline__ float log10_32(float x) { return (float)log10((double)x); }  // ALOG10
-__device__ __forceinline__ float sqrt32(float x) { return (float)sqrt((double)x); }
+// SQRT is the one function evaluated in binary32 on the strict path, because
+// it is the one where that is PROVABLY the same answer.  ``(float)sqrt(
+// (double)x)`` is a correctly rounded binary64 square root rounded again to
+// binary32, and for a binary32 argument that double rounding is innocuous
+// (53 >= 2*24 + 2), so it equals the correctly rounded binary32 ``sqrtf``
+// (--prec-sqrt=true) -- except in the bits of the NaN a negative argument
+// produces: the binary64 path yields 0xffc00000, sqrtf 0x7fffffff.  That one
+// case is patched below, and tests/cuda/test_exact_shortcuts.py compares
+// this function with the binary64 expression over ALL 2^32 binary32 inputs
+// (0 mismatches).  The binary64 sqrt runs at 1/64 rate on this card and was
+// the inner operation of GETHP's 40-node Gaussian integral.
+__device__ __forceinline__ float sqrt32(float x) {
+    float r = sqrtf(x);
+    return (x < 0.0f && r != r) ? __uint_as_float(0xffc00000u) : r;
+}
 __device__ __forceinline__ float exp32(float x)  { return (float)exp((double)x); }
 
 #endif  // VOACAP_FAST_MATH

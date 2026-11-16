@@ -78,6 +78,8 @@ __device__ inline int regmod(const LayerState* state, const ModesState* modes,
     int ihop = (int)(gcd / ghop + 0.01f);
     float hop = (float)ihop;
 
+    GroundMemo gmemo;                   // ground_loss_sum's, per call
+    ground_memo_init(&gmemo);
     for (int im = 1; im <= 7; ++im) {
         // ITRY = 1 here in the Fortran; the ITRY test below it is unreachable
         zon->hn[im] = -1.0f;
@@ -167,9 +169,8 @@ __device__ inline int regmod(const LayerState* state, const ModesState* modes,
         }
 
         // 160: ground reflection loss, averaged over the sample areas
-        float y = 0.0f;
-        for (int ig = 1; ig <= state->km; ++ig)
-            y = y + ground_loss(state, ig, del_, freq);
+        float y = ground_loss_sum(state, del_, cdel, freq,
+                                  &gmemo);                  // DO IG
         zon->grlos[im] = y / (float)state->km;
 
         int oob = 0;

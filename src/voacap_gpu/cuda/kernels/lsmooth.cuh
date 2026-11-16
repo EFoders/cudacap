@@ -35,7 +35,9 @@
 // Stage A's ``store.son[name][ifx, idx]`` would raise IndexError for idx
 // outside 0..2, which is what a LUF-arm IPFLAG of 300 produces.  A device
 // function cannot raise, so `save_pass` returns VC_SMOOTH_BAD_IDX there and
-// leaves the store untouched, mirroring numpy refusing the assignment.
+// leaves the store untouched, mirroring numpy refusing the assignment.  Every
+// status out of this header is already a GLOBAL code (status.cuh): `smooth_`
+// maps GENOIS's and RELBIL's local codes at its call sites.
 //
 // Rule 4b: DISINT's /3000 and DELPOW's /10 are constant denominators and go
 // through div32.
@@ -50,11 +52,13 @@
 #include "relbil.cuh"
 #include "serprb.cuh"
 #include "state.cuh"
+#include "status.cuh"
 
 #define VC_SMOOTH_NFREQ  12
 #define VC_SMOOTH_NROW   14         // NFREQ + 2, the numpy first dimension
 #define VC_SMOOTH_NPASS  3          // ... and its second: idx 0 unused, 1, 2
-#define VC_SMOOTH_BAD_IDX 21        // Stage A's IndexError on store[ifx, idx]
+// Stage A's IndexError on store[ifx, idx]; the code is in status.cuh.
+#define VC_SMOOTH_BAD_IDX VC_ST_LSMOOTH_BAD_IDX
 
 // LUFFY's "TEMPORARY STORAGE".  The sixteen _SON_SAVED columns, then the
 // three that are not plain /SON/ floats, then the long pass's own extras.
@@ -180,10 +184,10 @@ __device__ inline int smooth_(CircuitState* c, const CircuitTables* t,
                     &c->zon, &c->ndiag, t->array, t->aeff, t->iats, t->xfqs,
                     t->xfqe, t->offazim, t->numants, freq, c->noise, c->rlat,
                     c->nyear_is_2089);
-    if (st) return st;
+    if (st) return vc_status(VC_ST_GENOIS, st);
     st = relbil(&c->allm, &c->anois, &c->sigd, &c->son, t->iats, t->xfqs,
                 t->xfqe, t->pwrdba, t->numants, ifx, freq, c->rsn, c->lufp);
-    if (st) return st;
+    if (st) return vc_status(VC_ST_RELBIL, st);
     if (c->want_service_prob)
         serprb(&c->allm, &c->anois, &c->ton, &c->son, ifx, c->rsn, c->lufp);
     return 0;

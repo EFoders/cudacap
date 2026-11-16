@@ -81,11 +81,34 @@ production kernel), ``'cpu'`` (the scalar Stage-A reference, no cupy import,
 bit-identical to the kernel on every oracle deck and ~1000x slower), or
 ``'auto'`` (CUDA if a device is usable, else CPU with a ``UserWarning``).
 ``tests/test_cpu_backend.py`` holds the two to bit-identity.
+
+THE CUDA PATH
+-------------
+``predict(backend='cuda')`` does not run ``build_circuit`` at all.  The hours
+of the request become one batch of 32-byte ``SETUP_PARAMS`` rows (plus one
+:func:`setup_config` row and the per-circuit /cantenna/ from
+:func:`antcalc_cant`), the device builds each circuit-hour's state
+(``cuda/kernels/setup.cuh``, bit-identical to ``build_circuit``) and the
+warp-per-circuit-hour LUFFY kernel runs on it in place; /SON/ comes back as
+one packed table and is sliced into :class:`Results`.  The device rig and the
+ionosphere tables are cached between calls, keyed by size and by
+(coefficients, month, SSN) -- see ``_RigCache`` for the thread-safety rules
+and :func:`clear_device_cache` to release them.  ~8 ms warm for one circuit
+x 24 hours x 11 frequencies, against ~140 ms for the host-build path.
+``tests/test_predict_fast.py`` holds it bit-identical to the host-build path
+(``_predict_host``), which is still taken when a caller has replaced
+``build_circuit`` or ``predict_circuits`` (instrumentation, fault injection).
+
+For many circuits, :func:`predict_batch` (``voacap_gpu.batch``) runs them all
+in one chunked, pipelined device run.  :func:`coeffs_dir` is the public name
+of the packaged coefficient directory.
 """
 
 import copy
 import pathlib
+import threading
 import warnings
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -106,6 +129,7 @@ from voacap_gpu.scalar.noisy import noisy
 from voacap_gpu.scalar.readant import UnsupportedAntennaType, read_antenna
 from voacap_gpu.scalar.redmap import redmap
 from voacap_gpu.scalar.sang import sang
+from voacap_gpu.scalar.sonstate import LAYTYP
 from voacap_gpu.scalar.timvar import timvar
 from voacap_gpu.scalar.virtim import virtim
 
@@ -122,6 +146,18 @@ _PKG_COEFFS = pathlib.Path(__file__).resolve().parent / "data" / "coeffs"
 _VENDORED_COEFFS = (pathlib.Path(__file__).resolve().parents[2] / "reference"
                     / "voacapl" / "voacapl" / "itshfbc" / "coeffs")
 _COEFFS_DIR = _PKG_COEFFS if _PKG_COEFFS.is_dir() else _VENDORED_COEFFS
+
+
+def coeffs_dir() -> pathlib.Path:
+    """The CCIR/URSI coefficient directory ``predict`` reads (a ``Path``).
+
+    The packaged copy (``voacap_gpu/data/coeffs``), or the vendored oracle
+    tree in a source checkout without it.  This is the public spelling of
+    the private ``_COEFFS_DIR`` (still there, same value): pass it to
+    ``scalar.redmap.redmap`` when building an ionosphere yourself.
+    """
+    return _COEFFS_DIR
+
 
 _GCDLNG = F32(10000.0)          # blkdat long-path threshold, km
 
@@ -734,11 +770,56 @@ def setup_config(system=None, *, method=30, freqs=(), pole=POLE_DEFAULT,
 
 BACKENDS = ("cuda", "cpu", "auto")
 
+# THE STATUS TABLE (see Results, STATUS CODES).  Every refusal code the CUDA
+# kernel returns is GLOBALLY unique: ``code // 100`` is the routine and
+# ``code % 100`` that routine's own local code.  These mirror
+# ``cuda/kernels/status.cuh`` value for value, and
+# ``tests/cuda/test_status_codes.py`` holds them to it.
+STATUS_OK = 0
+STATUS_UNWRITTEN = -1                   # the driver's preset
+STATUS_ALLMODES_OVERFLOW = 101
+STATUS_FRQCOM_INDEX = 201
+STATUS_GENOIS_OLD = 301
+STATUS_GENOIS_GAIN_OOB = 302
+STATUS_GENOIS_AREA_COVERAGE = 303
+STATUS_REGMOD_MUFDAY = 401
+STATUS_REGMOD_FREQ = 402
+STATUS_REGMOD_GAIN_OOB = 403
+STATUS_REGMOD_AREA_COVERAGE = 404
+STATUS_ESMOD_GAIN_OOB = 503
+STATUS_ESMOD_AREA_COVERAGE = 504
+STATUS_SETTXR_DELMUF = 601
+STATUS_SETTXR_YMUF = 602
+STATUS_SETTXR_GAIN_OOB = 603
+STATUS_SETTXR_AREA_COVERAGE = 604
+STATUS_INMUF_ITMOD = 705
+STATUS_INMUF_MODES_ROW = 706
+STATUS_LNGPAT_INDEX = 801
+STATUS_RELBIL_INDEX = 901
+STATUS_SELTXR_INDEX = 1001
+STATUS_LSMOOTH_INDEX = 1101
+STATUS_LUFFY_BAD_NMODE2 = 1201
+STATUS_SETUP_HOUR = 1301
+
 # The CPU backend's own status code: the scalar reference raised somewhere the
-# CUDA kernel has no identifiable counterpart status for (see Results, STATUS
-# CODES).  Outside every callee-local code the kernel returns (1..6, 21, 22)
-# and the driver's -1 preset.
+# CUDA kernel has no identifiable counterpart status for.  Below 100, so it
+# cannot collide with any kernel code, and not the driver's -1 preset.
 STATUS_CPU_UNMAPPED = 99
+
+# routine base per scalar module, for the codes that are base + 1
+_STATUS_INDEX_REFUSAL = {"allmodes": STATUS_ALLMODES_OVERFLOW,
+                         "frqcom": STATUS_FRQCOM_INDEX,
+                         "lngpat": STATUS_LNGPAT_INDEX,
+                         "relbil": STATUS_RELBIL_INDEX,
+                         "seltxr": STATUS_SELTXR_INDEX}
+# GAIN's caller -> (table miss, area-coverage antenna)
+_STATUS_GAIN = {"genois": (STATUS_GENOIS_GAIN_OOB,
+                           STATUS_GENOIS_AREA_COVERAGE),
+                "regmod": (STATUS_REGMOD_GAIN_OOB,
+                           STATUS_REGMOD_AREA_COVERAGE),
+                "esmod": (STATUS_ESMOD_GAIN_OOB, STATUS_ESMOD_AREA_COVERAGE),
+                "settxr": (STATUS_SETTXR_GAIN_OOB,
+                           STATUS_SETTXR_AREA_COVERAGE)}
 
 # Exceptions the scalar LUFFY raises where the kernel returns a non-zero
 # status: the explicit refusals (AllModesOverflow, ModmufError, RegmodError,
@@ -789,21 +870,27 @@ def _resolve_backend(backend, fast_math=False) -> str:
 def _scalar_status(exc) -> int:
     """The CUDA status code for a refusal the scalar LUFFY raised.
 
-    The kernel's codes are callee-LOCAL (see :class:`Results`), so the code
-    is identified from WHERE the scalar reference raised -- the innermost
+    The kernel's codes are GLOBAL (``cuda/kernels/status.cuh``, the table in
+    :class:`Results`): routine base + that routine's local code.  The code is
+    identified from WHERE the scalar reference raised -- the innermost
     ``voacap_gpu.scalar`` frame of the traceback, plus GAIN's caller and,
     where one callee has two codes, the message or source line that tells
-    them apart.  Each arm mirrors a ``return N`` in ``cuda/kernels``:
+    them apart.  Each arm mirrors a status the kernel returns:
 
-        allmodes / frqcom / lngpat / relbil / seltxr   1
-        genois  OldNoiseModel (GENOIS_OLD)              1
-        gain    via genois: IndexError 2, NotImplementedError (area cov.) 3
-        gain    via regmod/esmod/settxr: IndexError 3, NotImplementedError 4
-        regmod  RegmodError: MUFday prob <= 0 -> 1, frequency <= 0 -> 2
-        settxr  ModmufError: DELMUF -> 1, YMUF -> 2
-        inmuf   IndexError on INM(ITMOD) -> 5, on a /MODES/ row -> 6
-        lsmooth IndexError on the smoothing store -> 21
-        luffy   IndexError, /allMODE/ NMODE(2) outside LAYTYP -> 22
+        allmodes IndexError                      STATUS_ALLMODES_OVERFLOW 101
+        frqcom   IndexError                      STATUS_FRQCOM_INDEX      201
+        genois   OldNoiseModel (GENOIS_OLD)      STATUS_GENOIS_OLD        301
+        gain     via genois: IndexError 302, NotImplementedError (area) 303
+        gain     via regmod: 403 / 404, via esmod: 503 / 504,
+                 via settxr: 603 / 604
+        regmod   RegmodError: MUFday prob <= 0 -> 401, frequency <= 0 -> 402
+        settxr   ModmufError: DELMUF -> 601, YMUF -> 602
+        inmuf    IndexError on INM(ITMOD) -> 705, on a /MODES/ row -> 706
+        lngpat   IndexError                      STATUS_LNGPAT_INDEX      801
+        relbil   IndexError                      STATUS_RELBIL_INDEX      901
+        seltxr   IndexError                      STATUS_SELTXR_INDEX     1001
+        lsmooth  IndexError on the smoothing store -> 1101
+        luffy    IndexError, /allMODE/ NMODE(2) outside LAYTYP -> 1201
 
     Anything else (e.g. SERPRB's NoModesError or FDIST/FINDF's convergence
     RuntimeError, which the kernel has no status for) is
@@ -828,32 +915,32 @@ def _scalar_status(exc) -> int:
     if where == "gain":
         caller = frames[-2][0] if len(frames) > 1 else ""
         area = isinstance(exc, NotImplementedError)      # oob_flag 2
-        if not (area or is_index):
+        if not (area or is_index) or caller not in _STATUS_GAIN:
             return STATUS_CPU_UNMAPPED
-        if caller == "genois":
-            return 3 if area else 2
-        if caller in ("regmod", "esmod", "settxr"):
-            return 4 if area else 3
-        return STATUS_CPU_UNMAPPED
-    if where in ("allmodes", "frqcom", "lngpat", "relbil", "seltxr"):
-        return 1 if is_index else STATUS_CPU_UNMAPPED
-    if where == "genois":
-        return 1 if isinstance(exc, NotImplementedError) else \
+        oob, area_code = _STATUS_GAIN[caller]
+        return area_code if area else oob
+    if where in _STATUS_INDEX_REFUSAL:
+        return _STATUS_INDEX_REFUSAL[where] if is_index else \
             STATUS_CPU_UNMAPPED
+    if where == "genois":
+        return STATUS_GENOIS_OLD if isinstance(exc, NotImplementedError) \
+            else STATUS_CPU_UNMAPPED
     if where == "regmod" and isinstance(exc, ValueError):
-        return 2 if "frequency must be positive" in msg else 1
+        return STATUS_REGMOD_FREQ if "frequency must be positive" in msg \
+            else STATUS_REGMOD_MUFDAY
     if where == "settxr" and is_index:
         if "YMUF" in msg:
-            return 2
+            return STATUS_SETTXR_YMUF
         if "DELMUF" in msg:
-            return 1
+            return STATUS_SETTXR_DELMUF
         return STATUS_CPU_UNMAPPED
     if where == "inmuf" and is_index:
-        return 5 if "inm[" in line else 6
+        return STATUS_INMUF_ITMOD if "inm[" in line else \
+            STATUS_INMUF_MODES_ROW
     if where == "lsmooth" and is_index:
-        return 21
+        return STATUS_LSMOOTH_INDEX
     if where == "luffy" and is_index and "NMODE(2)" in msg:
-        return 22
+        return STATUS_LUFFY_BAD_NMODE2
     return STATUS_CPU_UNMAPPED
 
 
@@ -1020,29 +1107,42 @@ class Results:
     -----------------------
     ``status[h]`` is the LUFFY kernel's return for that hour's circuit
     (``cuda/driver.py``).  0 = success.  -1 = the kernel never wrote it (the
-    driver's preset).  Anything else is the FIRST refusal a callee reported,
-    propagated unchanged -- each one marks a place where the Stage-A Python
-    raises because the Fortran would misbehave (read out of bounds, STOP, or
-    hit an unported feature).  The numbers are callee-LOCAL, so the same
-    value can mean different things; the ones seen in practice:
+    driver's preset).  Anything else is the FIRST refusal a callee reported
+    -- each one marks a place where the Stage-A Python raises because the
+    Fortran would misbehave (read out of bounds, STOP, or hit an unported
+    feature).  Every code is GLOBALLY unique (``cuda/kernels/status.cuh``,
+    mirrored by the ``engine.STATUS_*`` constants): ``status // 100`` is the
+    routine and ``status % 100`` that routine's own local code.
 
-        1   ALLMODES overflow (> 20 modes), FRQCOM index, RELBIL / LNGPAT /
-            SELTXR / SETTXR mode or ray index out of range, REGMOD STOP,
-            or GENOIS_OLD (unported)
-        2   GENOIS: receive-antenna GAIN lookup left the table
-            (``gain.cuh`` oob_flag 1 -- e.g. a frequency below 1 MHz);
-            also REGMOD STOP / SETTXR YMUF index
-        3   GENOIS: receive antenna is AREA-COVERAGE (oob_flag 2,
-            OFFAZIM == -999, not ported); REGMOD / ESMOD / SETTXR:
-            antenna GAIN lookup left the table (oob_flag 1)
-        4   REGMOD / ESMOD / SETTXR: area-coverage antenna (oob_flag 2)
-        5, 6  INMUF index out of range
-        21  smoothing store index (LUF-arm IPFLAG in the blend)
-        22  LUFFY: /allMODE/ NMODE(2) outside LAYTYP on the long path
+        101   ALLMODES: more than 20 modes
+        201   FRQCOM: frequency-complement index out of range
+        301   GENOIS: NYEAR ' 2089' selects the unported GENOIS_OLD
+        302   GENOIS: receive-antenna GAIN lookup left the table
+              (``gain.cuh`` oob_flag 1 -- e.g. a frequency below 1 MHz)
+        303   GENOIS: receive antenna is AREA-COVERAGE (oob_flag 2,
+              OFFAZIM == -999, not ported)
+        401   REGMOD STOP: MUFday probability <= 0
+        402   REGMOD STOP: frequency <= 0
+        403   REGMOD: antenna GAIN lookup left the table (oob_flag 1)
+        404   REGMOD: area-coverage antenna (oob_flag 2)
+        503   ESMOD: antenna GAIN lookup left the table
+        504   ESMOD: area-coverage antenna
+        601   SETTXR: MODMUF outside 1..4 (DELMUF)
+        602   SETTXR: MODMUF outside 1..4 (YMUF)
+        603   SETTXR: antenna GAIN lookup left the table
+        604   SETTXR: area-coverage antenna
+        705   INMUF: /MODES/ ITMOD outside 1..3
+        706   INMUF: zero-distance stage would write /MODES/ row 7
+        801   LNGPAT: YMUF index out of range
+        901   RELBIL: mode label outside LAYTYP
+        1001  SELTXR: ray index out of range
+        1101  LSMOOTH: smoothing store index (LUF-arm IPFLAG in the blend)
+        1201  LUFFY: /allMODE/ NMODE(2) outside LAYTYP on the long path
+        1301  SETUP: hour outside 1..24, the circuit was not built
 
-        99  CPU backend only (``STATUS_CPU_UNMAPPED``): the scalar reference
-            raised where the kernel has no identifiable status (e.g.
-            SERPRB's NoModesError)
+        99    CPU backend only (``STATUS_CPU_UNMAPPED``): the scalar reference
+              raised where the kernel has no identifiable status (e.g.
+              SERPRB's NoModesError)
 
     The CPU backend (``predict(..., backend='cpu')``) runs the scalar
     reference, which RAISES at each of these places; the exception is caught
@@ -1148,8 +1248,13 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
             rx_table_absolute=False, backend="cuda") -> Results:
     """Predict an HF point-to-point circuit from raw inputs.
 
-    The setup chain (geometry, ionosphere, MUFs) always runs on the host; only
-    LUFFY, the per-hour system-performance calculation, goes to ``backend``.
+    With ``backend='cuda'`` every requested hour runs as ONE device batch:
+    the setup chain (geometry, ionosphere, MUFs) is built on the device by
+    ``setup_batch`` and LUFFY runs on it in place (see the module docstring,
+    THE CUDA PATH).  With ``backend='cpu'`` the setup chain runs on the host
+    (``build_circuit`` per hour) and LUFFY is the scalar reference.  Both give
+    the same Results the host-build CUDA path does, bit for bit.
+    For many circuits use :func:`predict_batch`.
 
     Parameters
     ----------
@@ -1214,7 +1319,9 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
         Take the long great-circle (through-antipode) geometry (NPSL=1).
     fast_math : bool
         Opt into the non-bit-exact native-f32 device libm (CUDA only;
-        ``ValueError`` with ``backend='cpu'``).
+        ``ValueError`` with ``backend='cpu'``).  It covers the device-built
+        setup chain (geometry, ionosphere, MUFs) as well as LUFFY, exactly
+        as in :func:`predict_batch`, so the two agree with it on.
     backend : {'cuda', 'cpu', 'auto'}, default 'cuda'
         Where LUFFY runs.  ``'cuda'`` is the production CUDA kernel (needs
         cupy and a GPU).  ``'cpu'`` runs the scalar Stage-A reference
@@ -1266,20 +1373,13 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
     hours = _validate.check_hours(hours)
     freqs_f = np.array(_validate.check_freqs(freqs), dtype=np.float32)
 
-    def _parse(path):
-        if path is None:
-            return None
-        try:
-            return read_antenna(path)
-        except UnsupportedAntennaType as e:
-            raise NotImplementedError(str(e)) from e
-
     # ANTCALC per circuit: either end may independently be isotropic, a
     # type-14 table, or a type-13 azimuth-dependent table (which consumes
     # the path azimuth at that end, so the cant is built from tx/rx here).
     # freqs= makes a frequency outside a file antenna's MINFREQ..MAXFREQ
     # raise instead of GAIN silently returning 0 dBi for it.
-    cant = antcalc_cant(_parse(tx_antenna), _parse(rx_antenna), tx, rx,
+    cant = antcalc_cant(_parse_antenna(tx_antenna), _parse_antenna(rx_antenna),
+                        tx, rx,
                         power_kw=system.power_kw, tx_gos=system.tx_gos,
                         rx_gos=system.rx_gos, tx_bearing=tx_bearing,
                         rx_bearing=rx_bearing, long_path=long_path,
@@ -1289,8 +1389,52 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
                         rx_table_absolute=rx_table_absolute,
                         freqs=freqs_f)
 
-    # One coefficient map for the whole request; one INDEPENDENT circuit per
-    # hour (fresh /SON/), all sharing the iono and antenna tables.
+    if backend == "cuda" and _device_path_ok(long_path):
+        return _predict_device(tx, rx, hours, freqs_f, month, ssn, coeff,
+                               system, method, pole, long_path, cant,
+                               fast_math)
+    return _predict_host(tx, rx, hours, freqs_f, month, ssn, coeff, system,
+                         method, pole, long_path, cant, fast_math, backend,
+                         tx_bearing, rx_bearing)
+
+
+def _parse_antenna(path):
+    """A ``.VOA`` path -> parsed AntennaFile (None stays None)."""
+    if path is None:
+        return None
+    try:
+        return read_antenna(path)
+    except UnsupportedAntennaType as e:
+        raise NotImplementedError(str(e)) from e
+
+
+def _device_path_ok(long_path):
+    """Whether ``predict(backend='cuda')`` may take the device-setup path.
+
+    It may unless a caller has REPLACED one of the two host hooks the host
+    path is built from -- ``engine.build_circuit`` or
+    ``engine.predict_circuits`` (instrumentation and fault injection; the
+    test suite does both).  ``predict`` is specified as "build each hour,
+    then run LUFFY", so a replaced hook is honoured by taking the host path
+    rather than silently bypassed.  A ``long_path`` that is not 0/1 as an
+    integer (``long_path=2``) also takes the host path, so its pre-existing
+    behaviour is untouched (the device refuses NPSL outside 0/1).
+    """
+    return (build_circuit is _BUILD_CIRCUIT
+            and predict_circuits is _PREDICT_CIRCUITS
+            and int(long_path) in (0, 1))
+
+
+def _predict_host(tx, rx, hours, freqs_f, month, ssn, coeff, system, method,
+                  pole, long_path, cant, fast_math, backend, tx_bearing,
+                  rx_bearing):
+    """The host-build path: ``build_circuit`` per hour, then LUFFY.
+
+    The CPU backend's only path, and the CUDA reference the device path is
+    held bit-identical to (``tests/test_predict_fast.py``).  One coefficient
+    map for the whole request; one INDEPENDENT circuit per hour (fresh
+    /SON/), all sharing the iono and antenna tables.
+    """
     st = redmap(_COEFFS_DIR, coeff, int(month), np.float32(ssn))
     circuits, ipflags = [], []
     muf = np.empty(len(hours), np.float32)
@@ -1319,6 +1463,201 @@ def predict(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
                      system.required_reliability, status=status)
 
 
+# ---------------------------------------------------------------------------
+# The device-setup path, and the rigs it reuses
+# ---------------------------------------------------------------------------
+
+class _RigCache:
+    """A small LRU of device rigs (or device tables), shared between threads.
+
+    THREAD SAFETY.  A rig is mutable device state -- resident buffers that
+    take one submission at a time -- so it must never run two requests at
+    once.  Every entry is therefore a ``(value, lock)`` pair, and a caller
+    holds the entry's OWN lock for the whole submit-and-fetch; the cache's
+    lock guards only the dictionary (and construction, so two threads never
+    build the same rig twice).  Two threads wanting the same key take turns
+    on one rig; different keys can run at once.  Evicting an entry only drops
+    the cache's reference, so a thread mid-run keeps its rig alive until it
+    is done.
+
+    NO REQUEST STATE SURVIVES A CALL.  Every submission uploads its own
+    parameters, SYSTEM config and antenna tables, and the setup kernel
+    rebuilds every input field (and resets /SON/) per row, so a cached rig
+    cannot leak one caller's inputs into another's answer.  What is cached
+    is only what is a pure function of the key: device buffers sized by the
+    key, and the ionosphere tables, which depend only on (coefficients,
+    month, SSN).  Compiled kernels are cached by ``cuda/compile.py`` itself.
+    :func:`clear_device_cache` drops all of it and returns the memory.
+    """
+
+    def __init__(self, maxsize):
+        self.maxsize = int(maxsize)
+        self._lock = threading.Lock()
+        self._d = OrderedDict()
+
+    def get(self, key, factory):
+        """``(value, lock)`` for ``key``, building it with ``factory()``."""
+        with self._lock:
+            hit = self._d.get(key)
+            if hit is None:
+                hit = (factory(), threading.Lock())
+                self._d[key] = hit
+                while len(self._d) > self.maxsize:
+                    self._d.popitem(last=False)
+            else:
+                self._d.move_to_end(key)
+            return hit
+
+    def clear(self):
+        with self._lock:
+            self._d.clear()
+
+    def __len__(self):
+        return len(self._d)
+
+
+# (device, n, iono key, fast_math) -> SetupLuffy(warp=True): predict's rigs,
+# and predict_batch's for small batches.  ~55 KB of device state per row, so
+# a full cache of the widest small rigs is ~100 MB.
+_SMALL_RIGS = _RigCache(8)
+# (device, chunk, nstreams, fast_math) -> PipelinedSetupLuffy for large
+# batches.  These are big (chunk x nstreams x ~55 KB: ~0.7 GB at the default
+# 4096 x 3), so only ONE is kept; clear_device_cache() releases it.
+_BATCH_RIGS = _RigCache(1)
+# iono key -> (IonoSlot, shared_iono_tables dict): host-side, ~100 KB each.
+_IONO_TABLES = _RigCache(16)
+
+
+def clear_device_cache():
+    """Drop every cached device rig and return cupy's pooled memory.
+
+    ``predict`` (CUDA) and ``predict_batch`` keep their device rigs between
+    calls so that a warm call pays no allocation (see ``_RigCache``); the
+    large-batch rig holds ~0.7 GB.  Call this when the GPU is wanted for
+    something else.  Safe at any time: a call already running keeps its rig
+    until it finishes, and the next call rebuilds what it needs.
+    """
+    _SMALL_RIGS.clear()
+    _BATCH_RIGS.clear()
+    _IONO_TABLES.clear()
+    import sys
+    cp = sys.modules.get("cupy")
+    if cp is not None:
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+
+
+def _device_id():
+    import cupy as cp
+    return int(cp.cuda.Device().id)
+
+
+def _device_iono(coeff, month, ssn):
+    """``(key, IonoSlot, shared_iono_tables)`` for one (coeff, month, SSN).
+
+    The same ``redmap`` call ``_predict_host`` makes (and the same F32(ssn)
+    ``build_circuit`` puts on /DON/), so the device setup chain reads exactly
+    the tables the host one would.
+    """
+    from voacap_gpu.cuda.driver import IonoSlot, shared_iono_tables
+
+    key = (str(_COEFFS_DIR), coeff, int(month), float(F32(ssn)))
+
+    def make():
+        st = redmap(_COEFFS_DIR, coeff, int(month), np.float32(ssn))
+        return IonoSlot(st, int(month), ssn), shared_iono_tables([st])
+
+    (slot, tables), _lock = _IONO_TABLES.get(key, make)
+    return key, slot, tables
+
+
+def _small_rig(n, coeff, month, ssn, fast_math):
+    """A cached warp-per-circuit-hour ``SetupLuffy`` with this ionosphere.
+
+    ``luffy_batch_warp`` puts one circuit-hour on one warp (a lane per
+    frequency) and is bit-identical to the thread-per-circuit kernel
+    (``tests/cuda/test_luffy_warp.py``); for a few dozen circuit-hours it has
+    ~4x lower latency, because the thread kernel's latency is a whole LUFFY
+    run on one lane.  Returns ``(rig, lock)``.
+    """
+    from voacap_gpu.cuda.driver import SetupLuffy
+
+    ikey, slot, tables = _device_iono(coeff, month, ssn)
+    key = (_device_id(), int(n), ikey, bool(fast_math))
+    return _SMALL_RIGS.get(key, lambda: SetupLuffy(
+        int(n), [slot], tables, warp=True, fast_math=bool(fast_math)))
+
+
+# predict's rig width: every request of up to 24 hours shares one rig (the
+# padding rows repeat a real row and cost a few idle warps, not latency).
+_PREDICT_ROWS = 24
+
+
+def _predict_device(tx, rx, hours, freqs_f, month, ssn, coeff, system, method,
+                    pole, long_path, cant, fast_math):
+    """``predict`` on the device-setup path: one batch, no host build.
+
+    Every requested hour of the circuit becomes one SETUP_PARAMS row (the
+    same tx/rx, NPSL from ``long_path``; the config's ITIM=1 makes the hour
+    UTC), all sharing ONE SETUP_CONFIG row (:func:`setup_config`, which
+    carries the pole) and the per-circuit /cantenna/ ``antcalc_cant`` already
+    built.  ``setup_batch`` builds each CircuitState on the device --
+    bit-identical to ``build_circuit`` (tests/cuda/test_setup_batch.py) --
+    and LUFFY runs on it in place; only /SON/, the status and the MUF triple
+    come back.
+    """
+    from voacap_gpu.cuda.driver import SETUP_PARAMS_DTYPE, shared_antenna_tables
+
+    # METHOD / System / frequency checks, at the point build_circuit made
+    # them (after the antenna checks predict has already run)
+    cfg = setup_config(system, method=method, freqs=freqs_f, pole=pole)
+    H = len(hours)
+    params = np.zeros(H, SETUP_PARAMS_DTYPE)
+    params["tlatd"], params["tlongd"] = tx[0], tx[1]
+    params["rlatd"], params["rlongd"] = rx[0], rx[1]
+    params["hour"] = hours
+    params["npsl"] = int(long_path)
+    # iono / cfg slot 0: one ionosphere and one SYSTEM card per request
+    rig, lock = _small_rig(max(H, _PREDICT_ROWS), coeff, month, ssn,
+                           fast_math)
+    ant = shared_antenna_tables([cant])
+    with lock:
+        res, muf3 = rig.run(params, cfg.reshape(1), np.zeros(H, np.int32),
+                            ant=ant)
+    return _results_from_son(res.son, res.status, hours, freqs_f,
+                             muf3[:, 0], muf3[:, 1], muf3[:, 2],
+                             system.required_reliability)
+
+
+def predict_batch(*args, **kwargs):
+    """Many circuits in one device run; see :func:`voacap_gpu.batch.predict_batch`."""
+    from voacap_gpu.batch import predict_batch as _pb
+    return _pb(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# /SON/ -> Results
+# ---------------------------------------------------------------------------
+
+# LAYTYP index -> label, with the packed "" (index -1) as the LAST entry, so a
+# packed /SON/ MODE column indexes it directly.
+_MODE_BY_CODE = np.array(list(LAYTYP) + [""], dtype=object)
+
+
+def _results_from_son(son, status, hours, freqs_f, muf, fot, hpf, lufp):
+    """A packed ``(H,) SON_DTYPE`` table (one row per hour) -> Results."""
+    sl = slice(1, len(freqs_f) + 1)                # /SON/ slots 1..nf
+    return _finish_results(
+        hours, freqs_f, np.array(muf, np.float32), np.array(fot, np.float32),
+        np.array(hpf, np.float32), lufp,
+        np.array(son["sndb"][:, sl], np.float32),
+        np.array(son["dbw"][:, sl], np.float32),
+        np.array(son["reliab"][:, sl], np.float32),
+        np.array(son["dbu"][:, sl], np.float32),
+        np.array(son["nhp"][:, sl], np.int32),
+        _MODE_BY_CODE[son["mode"][:, sl]], status)
+
+
 def _assemble(circuits, hours, freqs_f, muf, fot, hpf, lufp, status=None):
     """Distil the mutated circuits' /SON/ into a :class:`Results`.
 
@@ -1328,41 +1667,54 @@ def _assemble(circuits, hours, freqs_f, muf, fot, hpf, lufp, status=None):
     ''; every computed cell is copied from /SON/ unchanged.
     """
     H, Fn = len(hours), len(freqs_f)
-    snr = np.full((H, Fn), np.nan, np.float32)
-    dbw = np.full((H, Fn), np.nan, np.float32)
-    rel = np.full((H, Fn), np.nan, np.float32)
-    dbu = np.full((H, Fn), np.nan, np.float32)
-    nhp = np.zeros((H, Fn), np.int32)
+    sl = slice(1, Fn + 1)                          # /SON/ slots 1..nf
+
+    def col(name, dt):
+        return np.array([np.asarray(getattr(c.son, name))[sl]
+                         for c in circuits], dt).reshape(H, Fn)
+
     mode = np.empty((H, Fn), object)
-    luf = np.full(H, np.nan, np.float32)
+    for k, c in enumerate(circuits):
+        mode[k, :] = list(c.son.mode[sl])
+    return _finish_results(hours, freqs_f, muf, fot, hpf, lufp,
+                           col("sndb", np.float32), col("dbw", np.float32),
+                           col("reliab", np.float32), col("dbu", np.float32),
+                           col("nhp", np.int32), mode, status)
+
+
+def _finish_results(hours, freqs_f, muf, fot, hpf, lufp, snr, dbw, rel, dbu,
+                    nhp, mode, status):
+    """The (H, F) tables -> Results: status, the valid mask, NaNs, the LUF.
+
+    Mutates the given arrays, which are this call's own.
+    """
+    H = len(hours)
     if status is None:
         status = np.zeros(H, np.int32)
     status = np.asarray(status, np.int32).reshape(-1)
     if status.shape != (H,):
         raise ValueError(f"status has shape {status.shape}, expected ({H},)"
                          " -- one per circuit-hour")
-    for k, c in enumerate(circuits):
-        son = c.son
-        for j in range(Fn):
-            s = j + 1                          # /SON/ slot for freq j
-            snr[k, j] = son.sndb[s]
-            dbw[k, j] = son.dbw[s]
-            rel[k, j] = son.reliab[s]
-            dbu[k, j] = son.dbu[s]
-            nhp[k, j] = int(son.nhp[s])
-            mode[k, j] = son.mode[s]
     valid = _valid_mask(nhp, status)
     for a in (snr, dbw, rel, dbu):
         a[~valid] = np.nan
     mode[~valid] = ""
-    for k in range(H):
-        # lowest REQUESTED frequency meeting the reliability (NaN compares
-        # False, so an invalid cell never qualifies)
-        thresh = lufp / 100.0
-        ok = [freqs_f[j] for j in range(Fn) if rel[k, j] >= thresh]
-        if ok:
-            luf[k] = min(ok)
+    # lowest REQUESTED frequency meeting the reliability (NaN compares False,
+    # so an invalid cell never qualifies) -- the same float32-reliab against
+    # `lufp / 100.0` comparison the per-cell loop made.
+    thresh = lufp / 100.0
+    ok = rel >= thresh
+    cand = np.where(ok, np.asarray(freqs_f, np.float32)[None, :],
+                    np.float32(np.inf))
+    luf = np.where(ok.any(axis=1), cand.min(axis=1, initial=np.inf),
+                   np.float32(np.nan)).astype(np.float32)
     return Results(hours=np.array(hours, np.int32), freqs=freqs_f, muf=muf,
                    fot=fot, hpf=hpf, luf=luf, snr=snr, dbw=dbw, reliab=rel,
                    field_dbu=dbu, nhp=nhp, mode=mode, status=status,
                    valid=valid)
+
+
+# The host hooks as defined here; predict compares against these to notice a
+# replaced (wrapped, monkeypatched) one -- see _device_path_ok.
+_BUILD_CIRCUIT = build_circuit
+_PREDICT_CIRCUITS = predict_circuits

@@ -20,6 +20,7 @@
 #ifndef VOACAP_FINDF_CUH
 #define VOACAP_FINDF_CUH
 
+#include "angcos.cuh"
 #include "constants.cuh"
 #include "f32math.cuh"
 #include "penang.cuh"
@@ -183,8 +184,9 @@ L360:                                   // INSERT CUSP FOR NEXT LAYER
     imode[iaf * 4 + k] = (fi[2 * 6 + k] <= 0.0f) ? 3 : il + 1;  // _ITYPE
     goto L375;
 L375: {                                 // MARTYN correction -> ground dist
-    float del_ = delfx[iaf * 4 + k] * VC_D2R;
-    float rcosd = VC_RZ * cos32(del_);
+    float deld = delfx[iaf * 4 + k];
+    float del_ = deld * VC_D2R;
+    float rcosd = VC_RZ * cos32_deg(deld, del_);    // cos32(del_)
     float xfsq = freq * freq / fc2;
     float ht = htflx[iaf * 4 + k];
     float xmut = 1.0f - fv * fv / (freq * freq);

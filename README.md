@@ -5,10 +5,10 @@ A GPU rewrite of **VOACAP** (Voice of America Coverage Analysis Program) HF iono
 This project was done in support of Prop-SL, an HF, LF and VLF propagation platform made while working in strategic HF communications. Prop-SL is property of the Department of National Defence, and the Government of Canada, but this project was made in my own time to support it and is free to build upon, within the confines of the MIT Licence. Claude was used throughout to translate Fortran, and to speedup testing and development. This said, I have reviewed the code and structure extensively to confirm its validity. 
 
 The point-to-point prediction engine is ported end to end and runs on the GPU.
-On an RTX 5080 the production path computes about 290,000 circuit-hours per
-second (9 frequencies each, bit-exact mode; 370,000 with fast-math), about
-4.6× all 32 threads of an i9-14900KF running the Fortran on the same work;
-see [Performance](#performance) for what that includes. See the two architecture documents:
+On an RTX 5080 the production path computes about 520,000 circuit-hours per
+second (9 frequencies each, METHOD 30, bit-exact; 780,000 with fast-math),
+about 8× all 32 threads of an i9-14900KF running the Fortran on the same work;
+see [Performance](#performance) for what that includes and the memory it needs. See the two architecture documents:
 
 - **[docs/architecture_fortran.md](docs/architecture_fortran.md)** — how the
   original scalar/sequential Fortran VOACAP works.
@@ -140,7 +140,7 @@ so existing callers get the same numbers, and they emit a `FutureWarning`.
 | `mode` | 2-character reflecting-layer label (`'F2'`, `' E'`, …) |
 | `muf`, `fot`, `hpf` | circuit MUF and its 90 % / 10 % decile frequencies, MHz, shape `(H,)` |
 | `luf` | lowest *requested* frequency that meets the required reliability, MHz; NaN if none does. This is not VOACAP's LUF |
-| `status` | per-hour kernel status, shape `(H,)`; 0 = computed, non-zero = refused by the kernel |
+| `status` | per-hour kernel status, shape `(H,)`; 0 = computed, non-zero = refused. Codes are globally unique: `code // 100` names the refusing routine (table in `src/voacap_gpu/cuda/kernels/status.cuh`, mirrored as `engine.STATUS_*`) |
 | `valid` | boolean mask, shape `(H, F)`; False where LUFFY computed nothing. The numeric tables are NaN there |
 
 `Results.at(hour, freq)` needs an exact frequency from `freqs`; any other value
@@ -170,7 +170,12 @@ wrap and on the long path; and a 3–20 MHz antenna range. The built gain
 tables equal ANTCALC's exactly. `tests/test_engine.py` holds the asserted
 bounds (signal fields ≤ 0.01 dB, reliability ≤ 2e-4, take-off angle ≤ 0.002°).
 
-**Randomised sweep (not in CI).** 2,200 random decks, 317,304 hour ×
+**Randomised sweep.** The full sweep is not run in CI, but its six most
+extreme decks are (`tests/test_sweep_regression.py`, `golden/dumps/luffy_sweep/`),
+end to end on CPU and CUDA, against sweep-sized bounds (signal ≤ 0.25 dB,
+reliability ≤ 1e-3, take-off angle ≤ 0.04°) with the one documented hop-count
+flip pinned, plus a SHA-256 of cudacap's own output per deck. The sweep itself:
+2,200 random decks, 317,304 hour ×
 frequency cells: the whole globe including the poles, 100–19,900 km plus long
 paths, METHOD 20/25/30, CCIR and URSI with and without sporadic E, SSN 0–200,
 and random SYSTEM and antenna settings.
@@ -218,54 +223,60 @@ Intel i9-14900KF (24 cores / 32 threads). **Identical workload on both
 sides:** transmitter Ottawa, receivers on the 2° world grid, 9 frequencies,
 July, SSN 120, CCIR, METHOD 30, `System()` defaults, 1 kW isotropic.
 Throughput is in circuit-hours per second (one path, one hour, all 9
-frequencies). Scripts and the raw results are in `tools/bench_vs_fortran/`
-(`gen_bench_decks.py`, then `bench_gpu.py` and, in WSL, `bench_fortran.sh`).
+frequencies). Scripts and raw results: `tools/bench_vs_fortran/` (and
+`tools/kernel_perf/` for the kernel profile).
 
-| Configuration | Workload | Wall time | Circuit-hours/s |
+| Configuration | Workload (circuit-hours) | Bit-exact | Fast-math |
 |---|---|---|---|
-| GPU, production path, bit-exact (chunk 65,536 × 2) | 395,304 (world grid) | 1.35 s | **292,000** |
-| GPU, production path, fast-math (chunk 65,536 × 2) | 395,304 | 1.07 s | 371,000 |
-| GPU, production path, bit-exact | 15,360 (640 circuits × 24 h) | 0.10 s | 152,000 |
-| Fortran, 32 processes in parallel | 15,360 (same 640 circuits) | 0.24 s | 63,700 |
-| Fortran, 1 process at a time | 1,536 (64 circuits × 24 h) | 0.44 s | 3,480 |
-| `predict()`, CUDA backend, one circuit × 24 h | 24 | 144 ms | 167 |
-| `predict()`, CPU backend, one circuit × 24 h | 24 | 1.49 s | 16 |
+| GPU, production path, chunk 32,768 × 2 | 395,304 (world grid) | **523,000/s** (0.76 s) | **776,000/s** (0.51 s) |
+| GPU, production path, chunk 16,384 × 2 | 15,360 (640 circuits × 24 h) | 231,000/s | 334,000/s |
+| Fortran, 32 processes in parallel | 15,360 (same 640 circuits) | 63,700/s | — |
+| Fortran, 1 process at a time | 1,536 (64 circuits) | 3,480/s | — |
+| `predict()`, CUDA, one circuit × 24 h × 11 freqs (warm) | 24 | 6.5 ms | — |
+| `predict()`, CPU backend, the same | 24 | 1.06 s | — |
 
-"Production path" is `PipelinedSetupLuffy` (what the Prop-SL service uses):
-raw coordinates in, geometry and ionosphere built on the device, results back
-on the host. Bit-exact mode used 8.6 GB of device memory at chunk 65,536 × 2
-streams (5.1 GB at 32,768 × 2, about 10% slower).
+**Area maps (METHOD 25, the Prop-SL service's grid setting), world grid ×
+24 h:** full rows plus host reduction (the service today) 0.44 s; slim rows
+plus host reduction 0.31 s; reduction on the GPU (`gridjob.run_grid`) 0.24 s.
+METHOD 25 skips the long-path model, so it is faster than the METHOD 30 rows
+above.
 
 What this means:
 
-- At world-grid scale the GPU is about **4.6× faster bit-exact and 5.8× with
-  fast-math than all 32 CPU threads** running the Fortran on the same work.
-  At 15,360 circuit-hours the GPU is under-filled and the gap is 2.4×.
-- The Fortran figures include one process start-up per circuit, as voacapl
-  runs one deck per process. A 1-hour deck takes 3.3 ms and a 24-hour deck
-  6.9 ms, so roughly 3 ms of each run is start-up. Without it, 32-thread
-  Fortran would be at most about 1.8× faster than measured, and the GPU's
-  lead at world-grid scale would shrink to about 2.5×.
-- `predict()` is the convenience API and is **host-bound**: one circuit takes
-  144 ms on CUDA, about 20× slower than one Fortran process. Use the device
-  rigs (`PipelinedSetupLuffy`) for anything larger than a handful of
-  circuits. The CPU backend is about 200× slower than the Fortran per
-  circuit-hour; it exists for machines without a GPU and for CI.
+- At world-grid scale the GPU is about **8× faster bit-exact and 12× with
+  fast-math than all 32 CPU threads** running the Fortran on the same work. On
+  the small 640-circuit job it is about 3.6× / 5.2×.
+- The Fortran figures include one process start-up per circuit (about 3 ms of
+  each 6.9 ms run), as voacapl runs one deck per process; without it 32-thread
+  Fortran would be at most about 1.8× faster than measured.
+- Phase 4 made the LUFFY kernel 2.5× faster (bit-exact; same results to the
+  bit, checked by `tests/cuda/test_bitexact_gate.py`): per-thread state now
+  lives in local memory laid out for coalesced access, plus exact shortcuts
+  (a binary32 square root proved equal on all 2³² inputs, ground-loss reuse, a
+  cosine table for the 40 fixed ray angles, bit-keyed memos). The remaining
+  limit is binary64 transcendentals (fast-math avoids them).
 
-**Older replay benchmark.** `tools/real_world_compare.py` replays 161,280
-captured, pre-built circuit-hours (host gather + PCIe + kernel; setup is not
-timed). Re-run on 2026-11-15: pipelined bit-exact 732 ms, pipelined
-fast-math 445 ms. Its "~9× / ~15× vs Fortran 32-core" ratios divide by a
-stored Fortran baseline from a 28-frequency deck
-([tools/results/fortran_baseline.md](tools/results/fortran_baseline.md)),
-not by the like-for-like measurement above. Against the measured 32-thread
-Fortran rate (63,700 circuit-hours/s, so 2.5 s for 161,280), the replay is
-3.5× (bit-exact) and 5.7× (fast-math).
+**Device memory.** The faster kernel reserves about **3.5 GB of local memory**
+per process (CUDA sizes it for every resident thread), on top of the chunk
+buffers. On a 16 GB card shared with a desktop, chunk 65,536 × 2 streams
+(about 15 GB in total) overflows and Windows pages GPU memory, halving speed;
+**use chunk 32,768 × 2 (about 10 GB) or smaller** on 16 GB. Building with
+`-DVC_LUFFY_GLOBAL_STATE` keeps the old global-memory layout (about 3.9 GB at
+chunk 32,768) at about 65% of the speed.
 
-Fast-math trades the binary64-round-once transcendentals for native f32 libm.
-It is 1.3–1.6× faster on the production path, keeps 99.34% of cells
-bit-exact, and changes no discrete decision in the tests. It is opt-in
-(`fast_math=True`); the default stays bit-exact.
+**Batch API.** `engine.predict_batch` / `voacap_gpu.batch.predict_batch` runs
+many circuits in one GPU job (one TX to many RX, or explicit pairs) and
+returns `(N, H, F)` arrays; `r.circuit(i)` equals `predict()` for circuit i
+bit for bit. It reorders circuits internally so those taking the same kernel
+branches share a warp (path-length class, then hour, then position) and
+returns answers in your order: a shuffled world grid runs 2.3× faster than
+unordered (302,000 vs 133,000/s at its default chunk). 200 circuits take
+about 33× less time than a `predict()` loop.
+
+**Legacy replay benchmark.** `tools/real_world_compare.py` replays pre-built
+captured circuits (setup not timed) against a stored 28-frequency Fortran
+baseline; both are marked LEGACY and the script now also prints the
+like-for-like table.
 
 ## Layout
 

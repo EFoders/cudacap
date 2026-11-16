@@ -49,6 +49,7 @@
 #ifndef VOACAP_SETTXR_CUH
 #define VOACAP_SETTXR_CUH
 
+#include "angcos.cuh"
 #include "constants.cuh"
 #include "f32math.cuh"
 #include "gain.cuh"
@@ -78,6 +79,15 @@ __device__ inline int settxr(const LayerState* state, const MufState* muf,
                              float freq, float gcdkm, float amind) {
     // .....FOR MAX. NUMBER OF HOPS
     float dend = pymin(4000.0f, gcdkm);
+    // Pure-function memos across the ray loop (bit-exact: a hit returns what
+    // a fresh evaluation of the same argument returns).  PROS does not depend
+    // on the ray at all -- MODMUF and YMUF are fixed for the call -- so its
+    // ALOG10 is evaluated once instead of once per priced ray.
+    GroundMemo gmemo;
+    ground_memo_init(&gmemo);
+    bool lp_have = false;
+    unsigned lp_key = 0u;
+    float lp_val = 0.0f;
     for (int jj = 1; jj <= 2; ++jj) {
         int k = itxrcp[jj];
         for (int ia = 1; ia <= VOACAP_SETTXR_NRAY; ++ia) {
@@ -130,8 +140,9 @@ __device__ inline int settxr(const LayerState* state, const MufState* muf,
             // .....CHECK FOR MINIMUM
             if (reflx->delfx[ia * 4 + k] < amind)
                 continue;
-            float del_ = reflx->delfx[ia * 4 + k] * VC_D2R;  // radiation angle
-            float cdel = cos32(del_);
+            float deld = reflx->delfx[ia * 4 + k];
+            float del_ = deld * VC_D2R;                     // radiation angle
+            float cdel = cos32_deg(deld, del_);             // cos32(del_)
             // .....E MODE (QUESTION MARK)
             if (state->fi[1 * 6 + k] < reflx->fvflx[ia * 4 + k]) {
                 //  F LAYER MODES                                        (125)
@@ -202,9 +213,8 @@ __device__ inline int settxr(const LayerState* state, const MufState* muf,
                 losx->aofx[ia * 4 + k] = 0.0f;
             }
             //  GROUND LOSS                                              (160)
-            float y = 0.0f;
-            for (int ig = 1; ig <= state->km; ++ig)
-                y = y + ground_loss(state, ig, del_, freq);
+            float y = ground_loss_sum(state, del_, cdel, freq,
+                                      &gmemo);              // DO IG
             float xkm = (float)state->km;
             // .....AVERAGE GROUND LOSS
             losx->grlosx[ia * 4 + k] = y / xkm;
@@ -232,7 +242,16 @@ __device__ inline int settxr(const LayerState* state, const MufState* muf,
             float pros = prbmuf(muf, freq, muf->ymuf[is_], muf->ymuf[is_],
                                 is_);
             // .....OVER-THE-MUF, MEDIAN
-            float xls = -10.0f * log10_32(pros) / cphet;
+            float lpros;
+            if (lp_have && __float_as_uint(pros) == lp_key) {
+                lpros = lp_val;
+            } else {
+                lpros = log10_32(pros);
+                lp_have = true;
+                lp_key = __float_as_uint(pros);
+                lp_val = lpros;
+            }
+            float xls = -10.0f * lpros / cphet;
             //  ADD ADJUSTMENT TO ABSORPTION LOSS
             losx->andvx[ia * 4 + k] = losx->andvx[ia * 4 + k] + xls;
             allm->prob[jj] = pros;      // same value every ray; see header

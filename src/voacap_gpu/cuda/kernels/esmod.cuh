@@ -147,6 +147,8 @@ __device__ inline int esmod(const LayerState* state, const MufState* muf,
     float ac = 677.2f * sigd->acav
                / (pow32(freq + state->gyz[k], 1.98f) + 10.2f);
 
+    GroundMemo gmemo;                   // ground_loss_sum's, per call
+    ground_memo_init(&gmemo);
     for (int ihop = ihsrt; ihop <= ihstp; ++ihop) {         // DO 150
         ih = ih + 1;
         float gp = (float)ihop;
@@ -199,9 +201,8 @@ __device__ inline int esmod(const LayerState* state, const MufState* muf,
         zon->tlhgh[ih] = pymin(zon->tlhgh[ih], 25.0f);
 
         // ground loss, averaged over the sample areas
-        float y = 0.0f;
-        for (int ig = 1; ig <= state->km; ++ig)                 // DO 130
-            y = y + ground_loss(state, ig, dele, freq);
+        float y = ground_loss_sum(state, dele, cdel, freq,
+                                  &gmemo);                  // DO 130
         float xkm = (float)state->km;
         float sgrlos = y / xkm;
 

@@ -42,7 +42,14 @@
 // is not bandwidth-bound: kernel time goes 63 ms -> 127 ms for a 64x increase
 // in threads, so it is hiding a long per-thread dependency chain, not waiting
 // on DRAM.  Coalescing was the wrong lever.  See tools/bench_stage_c.py.
-// Do NOT convert the remaining structs expecting a different answer.
+//
+// LATER (tools/kernel_perf/, per-phase clock64 profile): the dependency chain
+// it was hiding WAS memory latency, in the rest of CircuitState -- GENION's
+// and GETHP's linear scans of HTR/FNSQ and SETTXR's per-ray reads of /REFLX/,
+// every one an AoS access 24,980 bytes apart across the warp.  luffy_batch
+// now copies the whole CircuitState into LOCAL memory (interleaved per word
+// across the warp by the hardware) for the duration of the hour: GENION went
+// 8x faster per thread and the kernel ~2x.  /RAYS/ stays SoA as above.
 
 #ifndef VOACAP_RAYSVIEW_CUH
 #define VOACAP_RAYSVIEW_CUH

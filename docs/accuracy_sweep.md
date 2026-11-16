@@ -329,6 +329,15 @@ Candidate regression decks are in `golden/dumps/luffy_sweep/`: sw0112, sw1539,
 sw0008, sw1704, sw1714 and sw0759. Each has its `.dat` and its three CSVs, and
 the README there says what each one exercises.
 
+`tests/test_sweep_regression.py` runs these six decks end to end from their
+raw cards, on cpu and, when a device is usable, on cuda. It asserts the
+sweep-sized bounds above: signal fields 0.25 dB, reliab 1e-3, angle 0.04 deg,
+delay 0.015 ms and vhigh 1.5 km. Hop counts must be exact, except sw1704's
+four `INT(HN)` cells (h8-h11, 15.12 MHz, cudacap 1 vs voacapl 2), which are
+pinned to those values. The test also pins a SHA-256 of cudacap's current
+/SON/ output per deck, so any drift shows up. The bounds in
+`tests/test_engine.py` are unchanged.
+
 ## Timings
 
 RTX 5080, shared with other jobs during the run. The host is Windows 11 with

@@ -17,6 +17,7 @@
 #ifndef VOACAP_FDIST_CUH
 #define VOACAP_FDIST_CUH
 
+#include "angcos.cuh"
 #include "constants.cuh"
 #include "f32math.cuh"
 #include "state.cuh"
@@ -112,7 +113,8 @@ L185: {                                 // linear interpolation in the table
     float phe = atan32(tanp);
     // force correct geometry: radiation angle, then FV by Snell's law
     delmod[il * 4 + k] = (VC_PIO2 - phe - thet) * VC_R2D;
-    float sphi = VC_RZ * cos32(delmod[il * 4 + k] * VC_D2R) / (VC_RZ + ht);
+    float sphi = VC_RZ * cos32_deg(delmod[il * 4 + k],
+                                   delmod[il * 4 + k] * VC_D2R) / (VC_RZ + ht);
     sphi = 1.0f - sphi * sphi;
     sphi = pymax(sphi, 0.000001f);
     fvmod[il * 4 + k] = freq * sqrt32(sphi);

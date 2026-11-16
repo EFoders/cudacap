@@ -58,9 +58,10 @@
 // once for both models.
 //
 // STATUS, NOT EXCEPTIONS.  Stage A raises where the Fortran misbehaves; a
-// device function cannot, so every callee's non-zero status is propagated
-// unchanged and the state is left exactly where Stage A leaves it at the
-// raise.  LUFFY's own refusal -- /allMODE/ NMODE(2) outside LAYTYP on the
+// device function cannot, so every callee's non-zero status is propagated,
+// mapped at the call site from the callee's LOCAL code onto the globally
+// unique one (status.cuh: base per routine + local code), and the state is
+// left exactly where Stage A leaves it at the raise.  LUFFY's own refusal -- /allMODE/ NMODE(2) outside LAYTYP on the
 // long-path receiver-end assignment, where Stage A raises IndexError -- is
 // VC_LUFFY_BAD_NMODE2.  Return 0 is success.
 //
@@ -89,6 +90,7 @@
 #include "lecden.cuh"
 #include "lngpat.cuh"
 #include "lsmooth.cuh"
+#include "luffyprof.cuh"
 #include "mpath.cuh"
 #include "raysview.cuh"
 #include "relbil.cuh"
@@ -98,6 +100,7 @@
 #include "setlng.cuh"
 #include "sigdis.cuh"
 #include "state.cuh"
+#include "status.cuh"
 
 #define VC_LUFFY_NFREQ  12          // DO 265 IFX=1,12 -- 11 freqs plus the MUF
 #define VC_LUFFY_ILUF   13          // FREA(13)/MDL(13)/NHP(13), the summary
@@ -105,18 +108,20 @@
 #define VC_LUFFY_ES_FVAL 999.0f     // ALLMODES(2,FVAL): the sentinel frequency
 #define VC_LUFFY_NLAYTYP 5          // len(LAYTYP)
 
-// LUFFY's own refusal: Stage A's IndexError on /allMODE/ NMODE(2).
-#define VC_LUFFY_BAD_NMODE2 22
+// LUFFY's own refusal: Stage A's IndexError on /allMODE/ NMODE(2).  The
+// code is in the global table, status.cuh.
+#define VC_LUFFY_BAD_NMODE2 VC_ST_LUFFY_BAD_NMODE2
 
 // ---------------------------------------------------------------------------
 // GENOIS, with the circuit's tables -- Stage A's _genois.
 // ---------------------------------------------------------------------------
 __device__ inline int luffy_genois_(CircuitState* c, const CircuitTables* t,
                                     float freq) {
-    return genois(t->fam, t->dud, t->f2d111, &c->layers, &c->anois, &c->ton,
-                  &c->zon, &c->ndiag, t->array, t->aeff, t->iats, t->xfqs,
-                  t->xfqe, t->offazim, t->numants, freq, c->noise, c->rlat,
-                  c->nyear_is_2089);
+    return vc_status(VC_ST_GENOIS,
+        genois(t->fam, t->dud, t->f2d111, &c->layers, &c->anois, &c->ton,
+               &c->zon, &c->ndiag, t->array, t->aeff, t->iats, t->xfqs,
+               t->xfqe, t->offazim, t->numants, freq, c->noise, c->rlat,
+               c->nyear_is_2089));
 }
 
 // ---------------------------------------------------------------------------
@@ -157,10 +162,18 @@ __device__ inline void luffy_select_area_(CircuitState* c,
         if (!goto_85) {
             // .....ELECTRON DENSITY PROFILE -> IONOGRAM -> REFLECTRIX ->
             // .....DEVIATION LOSS FACTOR
+            VC_PROF_BEGIN(VC_PROF_LECDEN);
             lecden(&c->layers, k);
+            VC_PROF_END(VC_PROF_LECDEN);
+            VC_PROF_BEGIN(VC_PROF_GENION);
             genion(&c->layers, k);
+            VC_PROF_END(VC_PROF_GENION);
+            VC_PROF_BEGIN(VC_PROF_FOBBY);
             fobby(&c->layers, rays, k);
+            VC_PROF_END(VC_PROF_FOBBY);
+            VC_PROF_BEGIN(VC_PROF_ALOSFV);
             alosfv(&c->layers, &c->muf, k);
+            VC_PROF_END(VC_PROF_ALOSFV);
             if (ipfg == 100 || k > 1) {
                 *k_out = k; *xmdl_out = xmdl; return;
             }
@@ -204,7 +217,9 @@ __device__ inline int luffy_short_path_(CircuitState* c,
                                         int* skip) {
     *skip = 0;
     // .....RAY SET TABLE
+    VC_PROF_BEGIN(VC_PROF_FINDF);
     findf(&c->layers, &c->reflx, rays, k, freq, c->amind);
+    VC_PROF_END(VC_PROF_FINDF);
     int ihsrt, ihstp;
     if (c->reflx.dmaxkm[k] <= 0.0f) {
         if (ipfg == 300) {
@@ -231,33 +246,45 @@ __device__ inline int luffy_short_path_(CircuitState* c,
     }
 
     // .....HOP LOOP (IXHP counts the trips here and is never read)
+    VC_PROF_BEGIN(VC_PROF_HOPS);
     for (int ihop = ihsrt; ihop <= ihstp; ++ihop) {
         float hop = (float)ihop;
         c->modes.ghop = c->gcd / hop;               // .....HOP DISTANCE
         // .....FIND UP TO SIX MODES.  FDIST returns NUMMOD, not a status --
         // Stage A discards it here, and so does this.
+        VC_PROF_BEGIN(VC_PROF_FDIST);
         (void)fdist(&c->reflx, &c->modes, k, freq, c->amind);
+        VC_PROF_END(VC_PROF_FDIST);
         int nummod = 0;
+        VC_PROF_BEGIN(VC_PROF_INMUF);
         int st = inmuf(&c->layers, &c->modes, &c->muf, &c->sigd, &c->anois,
                    rays, t->array, t->aeff, t->iats, t->xfqs, t->xfqe,
                    t->offazim, t->pwrdba, t->numants, &c->zon, freq,
                    c->frq.jmode, c->gcd, ihop, &nummod);
-        if (st) return st;
+        VC_PROF_END(VC_PROF_INMUF);
+        if (st) return vc_status_inmuf(st);
         // .....SAVE ALL MODES AVAILABLE
         float dummy = 0.0f;
+        VC_PROF_BEGIN(VC_PROF_ALLM);
         st = allmodes(&c->zon, &c->allm, ipfg, hop, &dummy);
-        if (st) return st;
+        VC_PROF_END(VC_PROF_ALLM);
+        if (st) return vc_status(VC_ST_ALLMODES, st);
     }
+    VC_PROF_END(VC_PROF_HOPS);
 
     // .....UP TO 2 ES MODES, THEN THE (DEAD) ES-F MODE
+    VC_PROF_BEGIN(VC_PROF_ES);
     int st = esmod(&c->layers, &c->muf, &c->sigd, &c->anois, rays,
                    t->array, t->aeff, t->iats, t->xfqs, t->xfqe, t->offazim,
                    t->pwrdba, t->numants, &c->zon, freq, c->frq.jmode, c->gcd,
                    c->gcdkm, c->amind);
-    if (st) return st;
+    if (st) return vc_status(VC_ST_ESMOD, st);
     esreg(&c->zon);
     float dummy = 0.0f;
-    return allmodes(&c->zon, &c->allm, 2, VC_LUFFY_ES_FVAL, &dummy);
+    st = vc_status(VC_ST_ALLMODES,
+                   allmodes(&c->zon, &c->allm, 2, VC_LUFFY_ES_FVAL, &dummy));
+    VC_PROF_END(VC_PROF_ES);
+    return st;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,22 +294,32 @@ __device__ inline int luffy_long_path_(CircuitState* c,
                                        const CircuitTables* t,
                                        const RaysView& rays, float freq) {
     // .....AREA COVERAGE, TRANSMITTER END, THEN RECEIVER END
+    VC_PROF_BEGIN(VC_PROF_LFINDF);
     findf(&c->layers, &c->reflx, rays, c->frq.itxrcp[1], freq, c->amind);
     findf(&c->layers, &c->reflx, rays, c->frq.itxrcp[2], freq, c->amind);
+    VC_PROF_END(VC_PROF_LFINDF);
     // .....GAIN MINUS LOSS (which runs SETTXR)
+    VC_PROF_BEGIN(VC_PROF_GMLOSS);
     int st = gmloss(&c->layers, &c->muf, &c->sigd, &c->reflx, &c->losx,
                     rays, t->array, t->aeff, t->iats, t->xfqs, t->xfqe,
                     t->offazim, t->numants, &c->allm, &c->zon, &c->lpath,
                     c->frq.itxrcp, freq, c->gcdkm, c->amind);
-    if (st) return st;
+    VC_PROF_END(VC_PROF_GMLOSS);
+    if (st) return vc_status(VC_ST_SETTXR, st);   // GMLOSS = SETTXR's codes
     // .....SELECT OPTIMUM AT TRANSMITTER/RECEIVER ENDS
+    VC_PROF_BEGIN(VC_PROF_SELTXR);
     st = seltxr(&c->reflx, &c->losx, &c->lpath, c->frq.itxrcp, c->gcdkm,
                 c->amind, c->info);
-    if (st) return st;
+    VC_PROF_END(VC_PROF_SELTXR);
+    if (st) return vc_status(VC_ST_SELTXR, st);
     // .....DO MODE CALCULATIONS
-    return lngpat(&c->layers, &c->lpath, &c->losx, &c->reflx, &c->muf,
-                  &c->allm, &c->sigd, &c->anois, t->iats, t->xfqs, t->xfqe,
-                  t->pwrdba, t->numants, freq, c->gcd, c->frq.itxrcp[2]);
+    VC_PROF_BEGIN(VC_PROF_LNGPAT);
+    st = vc_status(VC_ST_LNGPAT,
+        lngpat(&c->layers, &c->lpath, &c->losx, &c->reflx, &c->muf,
+               &c->allm, &c->sigd, &c->anois, t->iats, t->xfqs, t->xfqe,
+               t->pwrdba, t->numants, freq, c->gcd, c->frq.itxrcp[2]));
+    VC_PROF_END(VC_PROF_LNGPAT);
+    return st;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,16 +348,20 @@ __device__ inline int luffy_frequency_(CircuitState* c, const CircuitTables* t,
     }
 
     float newfreq = 0.0f;
+    VC_PROF_BEGIN(VC_PROF_NOISE1);
     int st = allmodes(&c->zon, &c->allm, 0, freq, &newfreq);  // clear
-    if (st) return st;
+    if (st) return vc_status(VC_ST_ALLMODES, st);
     freq = newfreq;
     c->frq.freq = freq;
     // .....NOISE DISTRIBUTION
     st = luffy_genois_(c, t, freq);
+    VC_PROF_END(VC_PROF_NOISE1);
     if (st) return st;
 
     if (!(ipfg == 100 || ipfg == 300)) {
+        VC_PROF_BEGIN(VC_PROF_LONG);
         st = luffy_long_path_(c, t, rays, freq);
+        VC_PROF_END(VC_PROF_LONG);
         if (st) return st;
     } else {
         int skip = 0;
@@ -331,11 +372,17 @@ __device__ inline int luffy_frequency_(CircuitState* c, const CircuitTables* t,
     }
 
     // .....COMBINED RELIABILITY
+    VC_PROF_BEGIN(VC_PROF_NOISE2);
     st = luffy_genois_(c, t, freq);
+    VC_PROF_END(VC_PROF_NOISE2);
     if (st) return st;
+    VC_PROF_BEGIN(VC_PROF_RELBIL);
     st = relbil(&c->allm, &c->anois, &c->sigd, &c->son, t->iats, t->xfqs,
                 t->xfqe, t->pwrdba, t->numants, ifx, freq, c->rsn, c->lufp);
-    if (st) return st;
+    VC_PROF_END(VC_PROF_RELBIL);
+    if (st) return vc_status(VC_ST_RELBIL, st);
+
+    VC_PROF_BEGIN(VC_PROF_POST);
 
     if (ipfg < 300) {
         if (c->want_service_prob)       // IF( LINBOT(14) ) 285,285,280
@@ -362,9 +409,11 @@ __device__ inline int luffy_frequency_(CircuitState* c, const CircuitTables* t,
             return 0;                   // label 165, and no save
         }
     }
+    st = 0;
     if (c->mspec == 121)
-        return save_pass(c, store, ifx, ipflag);
-    return 0;
+        st = save_pass(c, store, ifx, ipflag);
+    VC_PROF_END(VC_PROF_POST);
+    return st;
 }
 
 // ---------------------------------------------------------------------------
@@ -452,29 +501,39 @@ __device__ inline int luffy_body_(CircuitState* c, const CircuitTables* t,
     if (ipfg > 200) {
         // .....FREQUENCY COMPLEMENT, and the required reliability
         int st = frqcom(&c->muf, c->frq.frea, 0, c->time.it);
-        if (st) return st;
+        if (st) return vc_status(VC_ST_FRQCOM, st);
         pluf = 0.01f * (float)c->lufp;
     }
 
     // .....SELECT CONTROLLING SAMPLE AREA
+    {
+    VC_PROF_BEGIN(VC_PROF_AREA);
     c->frq.jmode = selmod(&c->layers);
     // .....GET NOISE VALUE AT 1 MHZ FOR RCVR SITE
     anois1(&c->anois, t->fakp, t->fakmap, t->hmym, t->fakabp, t->abmap,
            t->f2d111, c->time.gmtr, c->rlong, c->rlongd, c->rlat);
+    VC_PROF_END(VC_PROF_AREA);
+    }
 
     // Label 83.  The smoothing recycle comes back here, NOT to the top:
     // SELMOD and ANOIS1 are above the label and run once for both models.
     while (true) {
         int k, xmdl;
+        VC_PROF_BEGIN(VC_PROF_AREA);
         luffy_select_area_(c, rays, ipfg, &k, &xmdl);  // labels 83, 84, 85
         // .....CAN RUN FOR SHORT PATHS ALSO, SO SET ALL SAMPLE AREAS
+        VC_PROF_BEGIN(VC_PROF_SETLNG);
         setlng(&c->layers, rays);
+        VC_PROF_END(VC_PROF_SETLNG);
+        VC_PROF_BEGIN(VC_PROF_SIGDIS);
         // .....SET ABSORPTION LOSS PARAMETERS, ADJUST SIGNAL DISTRIBUTION
         // .....TABLES
         sigdis(&c->layers, &c->muf, t->sys, t->perr, t->f2d111, &c->sigd,
                &c->ton, c->gcdkm, c->frq.jmode);
+        VC_PROF_END(VC_PROF_SIGDIS);
 
         int ihmin = luffy_min_hops_(c->muf.nhopmf);  // IHMX here, and dead
+        VC_PROF_END(VC_PROF_AREA);
 
         // .....START FREQUENCY LOOP
         c->son.nhp[VC_LUFFY_ILUF] = -1;
@@ -494,7 +553,9 @@ __device__ inline int luffy_body_(CircuitState* c, const CircuitTables* t,
         }
         // .....END OF FREQUENCY LOOP
         int again = 0;
+        VC_PROF_BEGIN(VC_PROF_AFTER);
         int st = luffy_after_loop_(c, t, ipflag, &store, &again);
+        VC_PROF_END(VC_PROF_AFTER);
         if (st) return st;
         if (!again)
             return 0;
@@ -560,7 +621,9 @@ __device__ inline int luffy(CircuitState* c,
                                   rays_n, rays_t);
 
     int mspec_temp = c->mspec;              // restored at label 999
+    VC_PROF_BEGIN(VC_PROF_TOTAL);
     int st = luffy_body_(c, &t, rays, ipflag);
+    VC_PROF_END(VC_PROF_TOTAL);
     c->mspec = mspec_temp;                  // Stage A's try/finally
     return st;
 }

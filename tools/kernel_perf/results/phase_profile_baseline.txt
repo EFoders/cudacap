@@ -1,0 +1,58 @@
+
+=== world n=65536 offset=0 fast_math=False ===
+production kernel 409.7 ms, instrumented 178.5 ms; instrumented answers bit-identical: True
+phase      share    cyc/ent  ent/thr  active
+AREA       27.4%   29882153     2.18   0.974
+NOISE1      0.8%     167582    11.79   0.952
+FINDF       7.8%    3737423     4.97   0.941
+FDIST       2.7%     687096     9.45   0.919
+INMUF       5.6%    1411564     9.45   0.919
+ALLM        2.0%     493408     9.45   0.919
+ES          0.1%      70192     4.97   0.878
+LONG       35.5%   12369777     6.83   0.874
+NOISE2      0.7%     150692    11.79   0.902
+RELBIL      1.9%     393214    11.79   0.902
+POST        1.2%     236100    11.79   0.902
+AFTER       0.1%     179498     1.18   0.952
+HOPS       10.5%    5025049     4.97   0.941
+TOTAL     100.0%  237871551     1.00   1.000
+a.LECDEN    0.8%    1132700     1.68   0.937
+a.GENION   22.2%   31395145     1.68   0.937
+a.FOBBY     2.1%    2915342     1.68   0.937
+a.ALOSFV    0.2%     253032     1.68   0.937
+a.SETLNG    0.2%     414675     1.18   0.952
+a.SIGDIS    0.1%     174613     1.18   0.952
+l.FINDF2   10.5%    3664252     6.83   0.874
+l.GMLOSS   21.4%    7441439     6.83   0.874
+l.SELTXR    2.6%     913648     6.83   0.874
+l.LNGPAT    0.9%     312440     6.83   0.874
+other      14.1%
+
+=== random n=65536 offset=0 fast_math=False ===
+production kernel 376.4 ms, instrumented 370.8 ms; instrumented answers bit-identical: True
+phase      share    cyc/ent  ent/thr  active
+AREA        9.4%   20167255     2.18   0.935
+NOISE1      0.7%     263581    11.77   0.880
+FINDF       3.4%    3211795     4.99   0.516
+FDIST       1.1%     537231     9.54   0.487
+INMUF       3.7%    1809440     9.54   0.487
+ALLM        0.1%      39834     9.54   0.487
+ES          0.0%       8322     4.99   0.434
+LONG       21.4%   14825031     6.78   0.435
+NOISE2      0.7%     265742    11.77   0.469
+RELBIL      0.8%     302133    11.77   0.469
+POST        0.1%      38910    11.77   0.469
+AFTER       0.1%     276432     1.18   0.880
+HOPS        4.9%    4586093     4.99   0.516
+TOTAL     100.0%  468585122     1.00   1.000
+a.LECDEN    0.4%    1030653     1.68   0.766
+a.GENION    5.4%   14964203     1.68   0.766
+a.FOBBY     1.0%    2924680     1.68   0.766
+a.ALOSFV    0.1%     198390     1.68   0.766
+a.SETLNG    0.7%    2791654     1.18   0.880
+a.SIGDIS    0.0%     120434     1.18   0.880
+l.FINDF2    4.3%    2943386     6.78   0.435
+l.GMLOSS   16.8%   11619946     6.78   0.435
+l.SELTXR    0.1%      79074     6.78   0.435
+l.LNGPAT    0.2%     169033     6.78   0.435
+other      58.7%

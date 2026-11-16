@@ -85,15 +85,16 @@
 // past the end) and overruns TimeState's 25-long UTIME/XLMT, so the build is
 // REFUSED rather than run on garbage.  The refusal travels as IPFLAG
 // VC_IPFLAG_REFUSED -- no legal IPFLAG is negative -- and luffy_batch turns
-// it into status VC_STATUS_TABLE_OOB (3), the code GAIN's out-of-bounds table
-// read already uses: Stage A raises IndexError for hour 25 for the same
-// reason.  driver.py range-checks on the host first; this is the defence in
+// it into status VC_STATUS_TABLE_OOB, which is VC_ST_SETUP_HOUR_OOB (1301) in
+// the global table (status.cuh): Stage A raises IndexError for hour 25 for the
+// same reason.  driver.py range-checks on the host first; this is the defence in
 // depth for a caller that bypasses it.
 #ifndef VC_IPFLAG_REFUSED
 #define VC_IPFLAG_REFUSED   (-1)
 #endif
+#include "status.cuh"
 #ifndef VC_STATUS_TABLE_OOB
-#define VC_STATUS_TABLE_OOB 3
+#define VC_STATUS_TABLE_OOB VC_ST_SETUP_HOUR_OOB
 #endif
 #define VC_SETUP_HOUR_MIN 1
 #define VC_SETUP_HOUR_MAX (VC_SETUP_NHOUR - 1)

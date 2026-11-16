@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.2.0 — 2026-11-16
+
+Performance release. Results in the default (bit-exact) mode are unchanged:
+`tests/cuda/test_bitexact_gate.py` pins SHA-256 digests of every output field
+over world-grid, random-order, METHOD 20/25/30, CCIR/URSI+Es, long-path and
+type-13/14 antenna workloads, generated before the changes.
+
+### Faster
+
+- LUFFY kernel 2.5× faster (bit-exact), 2.9× with fast-math: per-thread state
+  in local memory laid out for coalesced access, plus exact shortcuts (binary32
+  square root proved equal to the binary64 path on all 2^32 inputs, ground-loss
+  reuse across identical sample areas, a cosine table for the 40 fixed ray
+  angles, bit-keyed memos). World grid end to end: 0.76 s bit-exact at chunk
+  32,768 × 2 (was 1.35 s).
+- `predict()` builds the circuit on the device: one circuit × 24 h × 11
+  frequencies in about 6.5 ms warm (was 82–178 ms).
+
+### Added
+
+- `predict_batch` (`engine.predict_batch`, `voacap_gpu.batch`): many circuits in
+  one job, `(N, H, F)` arrays, internal warp-coherent ordering, results in the
+  caller's order; `r.circuit(i)` equals `predict()` bit for bit.
+- Slim outputs: `outputs=(...)` on `SetupLuffy.run` / `PipelinedSetupLuffy.run`
+  returns only the named /SON/ columns (101 MB instead of 785 MB per world
+  grid), bit-identical to the same columns of the full result.
+- On-device grid reduction: `gridjob.DeviceCellReducer` / `gridjob.run_grid`
+  reproduce `CellReducer` (order-dependent, strict ties, winner-frequency
+  accumulation) on the GPU; nothing per-row crosses the bus.
+- `engine.coeffs_dir()` (public replacement for `engine._COEFFS_DIR`, which
+  still works) and `engine.clear_device_cache()`.
+- Tests: the bit-exact gate, the six sweep regression decks, status-code
+  consistency, exhaustive checks of the exact shortcuts.
+
+### Changed (callers may notice)
+
+- **Status codes are globally unique.** `code // 100` names the routine (table
+  in `cuda/kernels/status.cuh`; `engine.STATUS_*`). 0 = success and -1 = not
+  written are unchanged; every non-zero refusal has a new number (e.g. the
+  setup kernel's bad-hour refusal 3 → 1301).
+- **Device memory:** the faster kernel reserves about 3.5 GB of local memory
+  per process. On a 16 GB card use chunk 32,768 × 2 or smaller; 65,536 × 2
+  overflows a card shared with a desktop. `-DVC_LUFFY_GLOBAL_STATE` restores
+  the old layout at about 65% of the speed.
+- `predict(fast_math=True)` now builds geometry, ionosphere and MUF with the
+  fast-math libm too (as `PipelinedSetupLuffy` always did), so its results
+  move slightly (MUF ~3e-6 relative) against 0.1.0's fast-math `predict`.
+  Bit-exact mode is unaffected.
+- `real_world_compare.py` and `tools/results/fortran_baseline.md` are marked
+  LEGACY; `tools/bench_vs_fortran/` is the like-for-like benchmark.
+
 ## 0.1.0 — 2026-11-15
 
 The first release after a full review. For valid inputs the numbers are the

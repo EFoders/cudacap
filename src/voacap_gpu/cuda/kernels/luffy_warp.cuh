@@ -762,8 +762,9 @@ __device__ inline void fobby_warp_(const LayerState* state,
     const float* htrue = state->htrue;
     int nang = rv_nang(rays);
     for (int ia = 1; ia <= nang; ++ia) {        // DO 650 IA=1,NANG
-        float del_ = rv_ang(rays, ia) * VC_D2R;
-        float rcosd = VC_RZ * cos32(del_);
+        float ang = rv_ang(rays, ia);
+        float del_ = ang * VC_D2R;
+        float rcosd = VC_RZ * cos32_deg(ang, del_);     // cos32(del_)
         for (int ih = 1 + VC_WSL(w); ih < 31;
              ih += VC_WSTRIDE) {               // DO 645 IH=1,30
             float fv = fvert[ih * 6 + k];
@@ -1081,20 +1082,21 @@ __device__ inline int luffy_short_path_lane_(const CircuitState* c,
                        rays, t->array, t->aeff, t->iats, t->xfqs, t->xfqe,
                        t->offazim, t->pwrdba, t->numants, &L->zon, freq,
                        c->frq.jmode, c->gcd, ihop, &nummod);
-        if (st) return st;
+        if (st) return vc_status_inmuf(st);
         float dummy = 0.0f;
         st = allmodes(&L->zon, &L->allm, ipfg, hop, &dummy);
-        if (st) return st;
+        if (st) return vc_status(VC_ST_ALLMODES, st);
     }
 
     int st = esmod(&c->layers, &L->muf, &L->sigd, &L->anois, rays, t->array,
                    t->aeff, t->iats, t->xfqs, t->xfqe, t->offazim, t->pwrdba,
                    t->numants, &L->zon, freq, c->frq.jmode, c->gcd, c->gcdkm,
                    c->amind);
-    if (st) return st;
+    if (st) return vc_status(VC_ST_ESMOD, st);
     esreg(&L->zon);
     float dummy = 0.0f;
-    return allmodes(&L->zon, &L->allm, 2, VC_LUFFY_ES_FVAL, &dummy);
+    return vc_status(VC_ST_ALLMODES,
+                     allmodes(&L->zon, &L->allm, 2, VC_LUFFY_ES_FVAL, &dummy));
 }
 
 __device__ inline int luffy_long_path_lane_(const CircuitState* c,
@@ -1105,13 +1107,14 @@ __device__ inline int luffy_long_path_lane_(const CircuitState* c,
                     t->array, t->aeff, t->iats, t->xfqs, t->xfqe, t->offazim,
                     t->numants, &L->allm, &L->zon, &L->lpath, c->frq.itxrcp,
                     freq, c->gcdkm, c->amind);
-    if (st) return st;
+    if (st) return vc_status(VC_ST_SETTXR, st);
     st = seltxr(&L->reflx, &L->losx, &L->lpath, c->frq.itxrcp, c->gcdkm,
                 c->amind, c->info);
-    if (st) return st;
-    return lngpat(&c->layers, &L->lpath, &L->losx, &L->reflx, &L->muf,
-                  &L->allm, &L->sigd, &L->anois, t->iats, t->xfqs, t->xfqe,
-                  t->pwrdba, t->numants, freq, c->gcd, c->frq.itxrcp[2]);
+    if (st) return vc_status(VC_ST_SELTXR, st);
+    return vc_status(VC_ST_LNGPAT,
+        lngpat(&c->layers, &L->lpath, &L->losx, &L->reflx, &L->muf,
+               &L->allm, &L->sigd, &L->anois, t->iats, t->xfqs, t->xfqe,
+               t->pwrdba, t->numants, freq, c->gcd, c->frq.itxrcp[2]));
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,16 +1197,18 @@ __device__ inline int luffy_freq_loop_warp_(CircuitState* c,
     if (alive) {
         reach = VC_WR_ALLM;
         float newfreq = 0.0f;
-        st = allmodes(&L->zon, &L->allm, 0, freq, &newfreq);
+        st = vc_status(VC_ST_ALLMODES,
+                       allmodes(&L->zon, &L->allm, 0, freq, &newfreq));
         if (st) alive = 0;
         else { freq = newfreq; L->freq = freq; }
     }
     if (alive) {
         reach = VC_WR_NOISE;
-        st = genois(t->fam, t->dud, t->f2d111, &c->layers, &L->anois, &L->ton,
+        st = vc_status(VC_ST_GENOIS,
+             genois(t->fam, t->dud, t->f2d111, &c->layers, &L->anois, &L->ton,
                     &L->zon, &L->ndiag, t->array, t->aeff, t->iats, t->xfqs,
                     t->xfqe, t->offazim, t->numants, freq, c->noise, c->rlat,
-                    c->nyear_is_2089);
+                    c->nyear_is_2089));
         if (st) alive = 0;
     }
 
@@ -1263,10 +1268,11 @@ __device__ inline int luffy_freq_loop_warp_(CircuitState* c,
     }
     if (alive) {
         // .....COMBINED RELIABILITY
-        st = genois(t->fam, t->dud, t->f2d111, &c->layers, &L->anois, &L->ton,
+        st = vc_status(VC_ST_GENOIS,
+             genois(t->fam, t->dud, t->f2d111, &c->layers, &L->anois, &L->ton,
                     &L->zon, &L->ndiag, t->array, t->aeff, t->iats, t->xfqs,
                     t->xfqe, t->offazim, t->numants, freq, c->noise, c->rlat,
-                    c->nyear_is_2089);
+                    c->nyear_is_2089));
         if (st) alive = 0;
     }
 
@@ -1294,9 +1300,10 @@ __device__ inline int luffy_freq_loop_warp_(CircuitState* c,
                                            e90, w));
     }
     if (alive && ran) {
-        st = relbil_tail(&L->allm, &L->anois, &c->son, t->iats, t->xfqs,
+        st = vc_status(VC_ST_RELBIL,
+             relbil_tail(&L->allm, &L->anois, &c->son, t->iats, t->xfqs,
                          t->xfqe, t->pwrdba, t->numants, ifx, freq, c->rsn,
-                         c->lufp, &don, ir);
+                         c->lufp, &don, ir));
         if (st) alive = 0;
     }
 
@@ -1434,7 +1441,8 @@ __device__ inline int luffy_body_warp_(CircuitState* c,
     }
     if (ipfg > 200) {
         // .....FREQUENCY COMPLEMENT, and the required reliability
-        st = frqcom(&c->muf, c->frq.frea, 0, c->time.it);
+        st = vc_status(VC_ST_FRQCOM,
+                       frqcom(&c->muf, c->frq.frea, 0, c->time.it));
         pluf = 0.01f * (float)c->lufp;
     }
     if (st)

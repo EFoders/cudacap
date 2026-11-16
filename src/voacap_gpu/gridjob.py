@@ -47,6 +47,18 @@ below have no repeated indices and are well defined.
 
 ``tests/test_gridjob.py`` checks this against a literal statement-by-statement
 port of the Go, on randomised sweeps, rather than against itself.
+
+ON THE DEVICE
+-------------
+:class:`DeviceCellReducer` is the same reduction run on the GPU, straight out
+of the rig's device state (``cuda/kernels/gridreduce.cuh``): one thread per
+cell replays that cell's samples in sweep order, chunk after chunk, so the
+order-dependent semantics hold by construction rather than by vector
+algebra.  Pass it as ``PipelinedSetupLuffy.run(..., reduce=red)`` -- or use
+:func:`run_grid` -- and a sweep's only transfer is the final ``5 x n_cells``
+float64 answer.  ``tests/cuda/test_gridreduce.py`` pins it bit for bit to
+:class:`CellReducer` (fed as :func:`feed_chunk_host`, the Prop-SL service's
+own feed) and to the Go transcription.
 """
 
 import numpy as np
@@ -251,6 +263,252 @@ class CellReducer:
         rel[miss] = SENTINEL_REL
         freq[miss] = self.default_freq
         return snr, dbw, dbu, rel, freq
+
+
+_GOAL_CODE = {"snr": 0, "dbw": 1, "dbu": 2, "reliab": 3}   # gridreduce.cuh
+
+# The /SON/ columns the reduction reads -- and, with "nhp" and "mode", what the
+# Prop-SL service's per-circuit path reads.  Pass either as ``outputs=``.
+GRID_OUTPUTS = ("sndb", "dbw", "dbu", "reliab")
+SERVICE_OUTPUTS = ("sndb", "dbw", "dbu", "reliab", "nhp", "mode")
+
+
+class DeviceCellReducer:
+    """:class:`CellReducer` on the GPU, fed straight from the device state.
+
+    Same answer, bit for bit, as feeding :class:`CellReducer` the way the
+    Prop-SL service does (``feed_chunk_host`` below is that feed): each /SON/
+    sample widened to float64, optionally sanitised (``sanitize=True``: a
+    non-finite dB value becomes -200 and a non-finite reliability 0, the
+    service's ``_finite``), the reliability multiplied by ``rel_scale`` (100,
+    PropServer's percentage), then the order-dependent winner-take-all.  With
+    ``sanitize=False`` the raw values go in and CellReducer's own non-finite
+    rule drops them.  See ``cuda/kernels/gridreduce.cuh`` for why the scan is
+    sequential per cell, and ``tests/cuda/test_gridreduce.py`` for the proof.
+
+    The per-cell state stays on the device across chunks AND across runs:
+    ``offset`` is the global sweep row of the next row fed, so a sweep may be
+    split over several ``rig.run`` calls (e.g. by hour) as long as they are
+    made in sweep order.  ``chunks`` is the frequency list per frequency-chunk
+    (``freq_chunks``); global row ``g`` is cell ``g % n_cells`` of block
+    ``g // n_cells``, which uses ``chunks[block % len(chunks)]`` at /SON/ slots
+    ``slot0 .. slot0 + len - 1`` -- the service's circuit order.
+
+    Usage::
+
+        red = DeviceCellReducer(n_cells, chunks, "snr", monthly_median=True)
+        rig.run(params, cfgs, ant, ant_idx, reduce=red)
+        snr, dbw, dbu, rel, freq = red.finalise()
+    """
+
+    def __init__(self, n_cells, chunks, rendering_mode="snr",
+                 monthly_median=False, default_freq=0.0, sanitize=True,
+                 rel_scale=100.0, slot0=1, block=128):
+        import cupy as cp
+        from voacap_gpu.cuda import driver as drv
+
+        self._cp = cp
+        self.n = int(n_cells)
+        if self.n <= 0:
+            raise ValueError(f"n_cells must be positive, got {n_cells}")
+        chunks = [[float(f) for f in ch] for ch in chunks]
+        if not chunks or any(not ch for ch in chunks):
+            raise ValueError("every frequency chunk needs a frequency")
+        if any(len(ch) > FREQS_PER_CIRCUIT for ch in chunks):
+            raise ValueError(f"a frequency chunk holds at most "
+                             f"{FREQS_PER_CIRCUIT} frequencies")
+        self.chunks = chunks
+        self.slot0 = int(slot0)
+        if self.slot0 < 0 or self.slot0 + max(map(len, chunks)) > 14:
+            raise ValueError("slot0 + frequencies must fit /SON/'s 14 slots")
+        self.goal = goal_of(rendering_mode)
+        self.monthly_median = bool(monthly_median)
+        self.default_freq = float(default_freq)
+        self.sanitize = bool(sanitize)
+        self.rel_scale = float(rel_scale)
+        self.block = int(block)
+        self.offset = 0
+        self._fn = drv.load_gridreduce_kernel()
+        self._reduce = self._fn.get_function("grid_reduce_chunk")
+        self._final = self._fn.get_function("grid_finalise")
+
+        fq = np.zeros((len(chunks), FREQS_PER_CIRCUIT), F64)
+        for i, ch in enumerate(chunks):
+            fq[i, :len(ch)] = ch
+        self._fq = cp.asarray(fq.ravel())
+        self._nfq = cp.asarray(np.array([len(c) for c in chunks], np.int32))
+        n = self.n
+        self.has = cp.zeros(n, np.int32)
+        self.best = cp.full(n, -np.inf, F64)
+        self.v = [cp.zeros(n, F64) for _ in range(5)]   # snr dbw dbu rel freq
+        self.count = cp.zeros(n, np.int64)
+        self.s = [cp.zeros(n, F64) for _ in range(4)]   # the hourly sums
+        self._grid = ((n + self.block - 1) // self.block,)
+
+    def advance(self, rows):
+        """``rows`` more sweep rows have been enqueued (the rig calls this)."""
+        self.offset += int(rows)
+
+    def enqueue_chunk(self, circ_words, stride, offsets, status, lo, c,
+                      stream=None):
+        """Reduce rows ``[lo, lo + c)`` (GLOBAL numbering) on ``stream``.
+
+        ``circ_words`` is the chunk's state as int32 words, ``stride`` words a
+        row, ``offsets`` the word offsets of slot 0 of sndb/dbw/dbu/reliab --
+        ``driver.CIRCUIT_WORDS`` / ``driver.GRID_SON_OFFSETS`` for a rig's
+        CircuitState, or a synthetic block's own.  Asynchronous; the caller
+        orders successive chunks (the rig does, with events).
+        """
+        if c <= 0:
+            return
+        args = (circ_words, np.int32(stride),
+                *(np.int32(o) for o in offsets), status,
+                np.int64(lo), np.int32(c), np.int32(self.n),
+                np.int32(len(self.chunks)), self._fq, self._nfq,
+                np.int32(self.slot0), np.int32(_GOAL_CODE[self.goal]),
+                np.int32(self.monthly_median), np.int32(self.sanitize),
+                np.float64(self.rel_scale), self.has, self.best, *self.v,
+                self.count, *self.s)
+        if stream is None:
+            self._reduce(self._grid, (self.block,), args)
+        else:
+            with stream:
+                self._reduce(self._grid, (self.block,), args)
+
+    def feed_words(self, words, status, offsets, slots=14):
+        """Host convenience (tests): reduce a ``(rows, stride)`` int32 block.
+
+        ``offsets`` locate the four columns inside a row exactly as for
+        ``enqueue_chunk``; the rows are the next ``rows`` of the sweep.
+        """
+        cp = self._cp
+        words = np.ascontiguousarray(words, np.int32)
+        rows, stride = words.shape
+        d_w = cp.asarray(words)
+        d_s = cp.asarray(np.ascontiguousarray(status, np.int32))
+        self.enqueue_chunk(d_w, stride, offsets, d_s, self.offset, rows)
+        self.offset += rows
+        cp.cuda.Device().synchronize()       # keep d_w/d_s alive till done
+
+    def finalise(self):
+        """``cellAgg.finalise`` for every cell -> five float64 numpy columns
+        (snr, dbw, dbu, rel, freq), one ``5 * n_cells * 8``-byte transfer."""
+        cp = self._cp
+        out = cp.empty(5 * self.n, F64)
+        self._final(self._grid, (self.block,),
+                    (self.has, *self.v, self.count, *self.s,
+                     np.float64(self.default_freq), out, np.int32(self.n)))
+        host = cp.asnumpy(out).reshape(5, self.n)
+        return tuple(np.ascontiguousarray(host[k]) for k in range(5))
+
+
+def _finite(a, sentinel):
+    """The service's sanitiser: float64, non-finite -> ``sentinel``."""
+    a = np.asarray(a, F64)
+    return np.where(np.isfinite(a), a, sentinel)
+
+
+def feed_chunk_host(red, chunks, n_cells, lo, hi, res, sanitize=True,
+                    rel_scale=100.0, slot0=1):
+    """One delivered chunk -> :meth:`CellReducer.feed`, the service's way.
+
+    A transcription of Prop-SL's ``handle_predict_grid.on_chunk`` (with its
+    ``_son_columns``): rows ``[lo, hi)`` of the sweep, in GLOBAL numbering,
+    are cut into (hour, frequency-chunk) blocks and fed frequency by
+    frequency.  ``res`` may be full or slim; only sndb/dbw/dbu/reliab at
+    slots ``slot0 ..`` and the status are read.
+    """
+    mx = max(len(c) for c in chunks)
+    sl = slice(slot0, slot0 + mx)
+    son = res.son
+    if sanitize:
+        snr = _finite(son["sndb"][:, sl], -200.0)
+        dbw = _finite(son["dbw"][:, sl], -200.0)
+        dbu = _finite(son["dbu"][:, sl], -200.0)
+        rel = _finite(son["reliab"][:, sl], 0.0)
+    else:
+        snr, dbw, dbu, rel = (np.asarray(son[k][:, sl], F64)
+                              for k in GRID_OUTPUTS)
+    ok_all = np.asarray(res.status) == 0
+    for blk, r0, r1, cells in block_spans(lo, hi, n_cells):
+        ci = blk % len(chunks)
+        rows = slice(r0, r1)
+        ok = ok_all[rows]
+        for j, f in enumerate(chunks[ci]):
+            red.feed(cells, ok, snr[rows, j], dbw[rows, j], dbu[rows, j],
+                     rel[rows, j] * rel_scale, f)
+
+
+def sweep_params(tx, lat, lon, hours, n_fchunks, iono=0, npsl=0):
+    """The sweep's SETUP_PARAMS block, in the service's circuit order.
+
+    Hours outermost, then frequency-chunk, then cell; ``cfg`` is the
+    frequency-chunk index, so ``cfgs[j]`` must carry ``freq_chunks(..)[j]``.
+    """
+    from voacap_gpu.cuda.driver import SETUP_PARAMS_DTYPE
+    lat = np.asarray(lat)
+    lon = np.asarray(lon)
+    n_cells = lat.size
+    n_blocks = len(hours) * int(n_fchunks)
+    p = np.zeros(n_blocks * n_cells, SETUP_PARAMS_DTYPE)
+    p["tlatd"] = float(tx[0])
+    p["tlongd"] = float(tx[1])
+    p["rlatd"] = np.tile(lat.astype(np.float32), n_blocks)
+    p["rlongd"] = np.tile(lon.astype(np.float32), n_blocks)
+    blk_hour = np.repeat(np.asarray(hours, np.int32), int(n_fchunks))
+    p["hour"] = np.repeat(blk_hour, n_cells)
+    blk_cfg = np.tile(np.arange(int(n_fchunks), dtype=np.int32), len(hours))
+    p["cfg"] = np.repeat(blk_cfg, n_cells)
+    p["npsl"] = int(npsl)
+    p["iono"] = int(iono)
+    return p
+
+
+def run_grid(rig, params, cfgs, ant, ant_idx, n_cells, chunks,
+             rendering_mode="snr", monthly_median=False, default_freq=0.0,
+             device=True, on_progress=None, sanitize=True, rel_scale=100.0,
+             host_outputs=GRID_OUTPUTS):
+    """A whole sweep on a ``PipelinedSetupLuffy`` -> one reduced row per cell.
+
+    ``device=True`` reduces on the GPU (:class:`DeviceCellReducer`): nothing
+    per-row leaves the card and the answer is one ``5 x n_cells`` float64
+    transfer.  ``device=False`` is the host path the service uses today --
+    ``on_chunk`` + :class:`CellReducer` -- with the results brought back as
+    ``host_outputs`` (slim; pass None for the full /SON/).  Both return
+    ``(snr, dbw, dbu, rel, freq)``, bit-identical to each other.
+
+    ``on_progress(done, total)`` is called as each chunk lands.
+    """
+    n = len(params)
+    done = [0]
+
+    if device:
+        red = DeviceCellReducer(n_cells, chunks, rendering_mode,
+                                monthly_median=monthly_median,
+                                default_freq=default_freq, sanitize=sanitize,
+                                rel_scale=rel_scale)
+
+        def progress(lo, hi, _res, _m3):
+            done[0] += hi - lo
+            on_progress(done[0], n)
+
+        rig.run(params, cfgs, ant, ant_idx, reduce=red,
+                on_chunk=None if on_progress is None else progress)
+        return red.finalise()
+
+    red = CellReducer(n_cells, rendering_mode, monthly_median=monthly_median,
+                      default_freq=default_freq)
+
+    def on_chunk(lo, hi, res, _m3):
+        feed_chunk_host(red, chunks, n_cells, lo, hi, res, sanitize=sanitize,
+                        rel_scale=rel_scale)
+        done[0] += hi - lo
+        if on_progress is not None:
+            on_progress(done[0], n)
+
+    rig.run(params, cfgs, ant, ant_idx, on_chunk=on_chunk,
+            outputs=host_outputs)
+    return red.finalise()
 
 
 def block_spans(lo, hi, n_cells):

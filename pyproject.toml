@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voacap-gpu"
-version = "0.1.0"
+version = "0.2.0"
 description = "GPU rewrite of VOACAP HF propagation prediction (CUDA via CuPy/NVRTC), validated module-by-module against the Fortran oracle"
 readme = "README.md"
 requires-python = ">=3.11"

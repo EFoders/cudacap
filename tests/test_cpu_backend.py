@@ -25,7 +25,9 @@ import numpy as np
 import pytest
 
 from voacap_gpu import engine
-from voacap_gpu.engine import (STATUS_CPU_UNMAPPED, System, build_circuit,
+from voacap_gpu.engine import (STATUS_CPU_UNMAPPED,
+                               STATUS_GENOIS_AREA_COVERAGE,
+                               STATUS_GENOIS_GAIN_OOB, System, build_circuit,
                                predict, predict_circuits)
 from voacap_gpu.scalar.antennastate import AREA_COVERAGE
 
@@ -221,10 +223,12 @@ def _area_coverage(c):
 
 
 _STATUS_CASES = {
-    # GENOIS's receive GAIN lookup below 1 MHz: Stage A IndexError, kernel 2
-    "sub_1mhz": (TOKYO, SYDNEY, [7.0, 14.0, 0.5], None, 2),
-    # area-coverage receive antenna: Stage A NotImplementedError, kernel 3
-    "area_coverage": (LONDON, PARIS, [7.0, 14.0], _area_coverage, 3),
+    # GENOIS's receive GAIN lookup below 1 MHz: Stage A IndexError, kernel 302
+    "sub_1mhz": (TOKYO, SYDNEY, [7.0, 14.0, 0.5], None,
+                 STATUS_GENOIS_GAIN_OOB),
+    # area-coverage receive antenna: Stage A NotImplementedError, kernel 303
+    "area_coverage": (LONDON, PARIS, [7.0, 14.0], _area_coverage,
+                      STATUS_GENOIS_AREA_COVERAGE),
 }
 
 
@@ -245,7 +249,7 @@ def test_cpu_status_equals_cuda_status(case):
 
 
 def test_cpu_refusal_reaches_results_through_predict(monkeypatch):
-    """As test_results' GPU twin: status 3 for every hour, nothing valid."""
+    """As test_results' GPU twin: status 303 for every hour, nothing valid."""
     real = engine.build_circuit
 
     def area_coverage(*a, **kw):
@@ -256,7 +260,7 @@ def test_cpu_refusal_reaches_results_through_predict(monkeypatch):
     monkeypatch.setattr(engine, "build_circuit", area_coverage)
     r = predict(LONDON, PARIS, freqs=[7.0, 14.0], month=6, ssn=100,
                 hours=[1, 13], backend="cpu")
-    assert r.status.tolist() == [3, 3]
+    assert r.status.tolist() == [STATUS_GENOIS_AREA_COVERAGE] * 2
     assert not r.valid.any()
     assert np.all(np.isnan(r.snr)) and np.all(np.isnan(r.luf))
 

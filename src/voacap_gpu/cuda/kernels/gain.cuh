@@ -48,25 +48,40 @@
 // Returns RAIN, the loss magnitude; the companion EFF output is 0 on this
 // path (GAIN presets it and never touches it here).  A non-positive
 // conductivity means "no ground data" and returns 0.
-__device__ inline float ground_loss(const LayerState* st, int ig, float delta,
-                                    float fmc) {
-    float sigma = st->sigpat[ig];
-    float er = st->epspat[ig];
-    if (sigma <= 0.0f)
-        return 0.0f;                    // RAIN keeps its preset 0
-    float relta = delta;
-    float x = 18000.0f * sigma / fmc;
-    float t = cos32(relta);
-    float q = sin32(relta);
+// GROUND_LOSS IN TWO HALVES.  Every expression below is exactly the original
+// ground_loss's; only WHERE some values are evaluated moves (t = COS(DELTA)
+// and q = SIN(DELTA) can come from the caller, the elevation-independent half
+// can come from a memo), and every helper is a pure function of its
+// arguments, so the result is the same bits.
+//
+// The half of the per-area body that depends only on (SIGPAT, EPSPAT, FMC),
+// not on the elevation -- the same expressions, evaluated separately.
+struct GroundArea {
+    float x, u, v, asxv;
+};
+
+__device__ inline GroundArea ground_area_(float sigma, float er, float fmc) {
+    GroundArea g;
+    g.x = 18000.0f * sigma / fmc;
+    g.u = er * er + g.x * g.x;
+    g.v = sqrt32(g.u);
+    g.asxv = asin32(g.x / g.v);
+    return g;
+}
+
+// ... and the half that depends on the elevation (t, q).
+__device__ inline float ground_loss_ray_(const GroundArea& g, float er,
+                                         float delta, float t, float q) {
+    float x = g.x;
     float r = q * q;
     float s = r * r;
     float ert = er - t * t;
     float rho = sqrt32(ert * ert + x * x);
     float rho12 = sqrt32(rho);
     float alpha = -atan32(x / ert);
-    float u = er * er + x * x;
-    float v = sqrt32(u);
-    float asxv = asin32(x / v);
+    float u = g.u;
+    float v = g.v;
+    float asxv = g.asxv;
     // vertical-polarisation reflection coefficient
     float cv = sqrt32(rho * rho + u * u * s
                       - 2.0f * rho * u * r * cos32(alpha + 2.0f * asxv))
@@ -80,6 +95,105 @@ __device__ inline float ground_loss(const LayerState* st, int ig, float delta,
     if (delta <= 0.00000001f)
         rain = 6.0f;
     return rain;
+}
+
+__device__ inline float ground_loss_tq_(float sigma, float er, float delta,
+                                        float fmc, float t, float q) {
+    return ground_loss_ray_(ground_area_(sigma, er, fmc), er, delta, t, q);
+}
+
+__device__ inline float ground_loss(const LayerState* st, int ig, float delta,
+                                    float fmc) {
+    float sigma = st->sigpat[ig];
+    float er = st->epspat[ig];
+    if (sigma <= 0.0f)
+        return 0.0f;                    // RAIN keeps its preset 0
+    float relta = delta;
+    return ground_loss_tq_(sigma, er, relta, fmc, cos32(relta), sin32(relta));
+}
+
+// THE GROUND-LOSS SUM, ``Y = 0; DO IG=1,KM: Y = Y + GAIN(-IG, DELTA, FMC)``,
+// as REGMOD, ESMOD and SETTXR each write it -- the same additions in the same
+// order, so the same bits -- but without recomputing what cannot change:
+//
+//   * COS(DELTA) is the caller's own (each caller has just computed
+//     ``cdel = cos32(delta)`` from the SAME `delta`, and passes it as
+//     `cosd`), and SIN(DELTA) is evaluated once, not once per area;
+//   * an area whose (SIGPAT, EPSPAT) are BITWISE equal to an earlier area's
+//     reuses that area's RAIN.  GEOM assigns only two ground types (land
+//     0.001/4 and sea 5/80, geom.cuh) and SETLNG copies areas, so a
+//     five-area path evaluates the Fresnel formula at most twice.
+//
+// ground_loss is a pure function of (SIGPAT, EPSPAT, DELTA, FMC), so reusing
+// a value for identical arguments is exact.  This was the hottest code in the
+// kernel: five binary64 COS, an ASIN, an ATAN, a LOG per area per ray.
+//   * the elevation-independent half (the ASIN) is memoised across the
+//     caller's rays/modes in a GroundMemo, below.
+//
+// A caller-held memo of ground_area_ across the rays/modes of one routine
+// call: keyed on the BITS of (SIGPAT, EPSPAT, FMC), so a hit is the value a
+// fresh evaluation would produce.  GEOM's two ground types fill it.
+struct GroundMemo {
+    int n;
+    unsigned sb[2], eb[2], fb[2];
+    GroundArea g[2];
+};
+
+__device__ __forceinline__ void ground_memo_init(GroundMemo* m) { m->n = 0; }
+
+__device__ inline GroundArea ground_area_memo_(GroundMemo* m, float sigma,
+                                               float er, float fmc) {
+    unsigned sb = __float_as_uint(sigma), eb = __float_as_uint(er),
+             fb = __float_as_uint(fmc);
+    for (int j = 0; j < m->n; ++j)
+        if (m->sb[j] == sb && m->eb[j] == eb && m->fb[j] == fb)
+            return m->g[j];
+    GroundArea g = ground_area_(sigma, er, fmc);
+    if (m->n < 2) {
+        int j = m->n++;
+        m->sb[j] = sb; m->eb[j] = eb; m->fb[j] = fb; m->g[j] = g;
+    }
+    return g;
+}
+
+__device__ inline float ground_loss_sum(const LayerState* st, float delta,
+                                        float cosd, float fmc,
+                                        GroundMemo* memo) {
+    float y = 0.0f;
+    int ns = 0;
+    int sk[5], ek[5];
+    float rk[5];
+    float q = 0.0f;
+    bool have_q = false;
+    for (int ig = 1; ig <= st->km; ++ig) {
+        float sigma = st->sigpat[ig];
+        float er = st->epspat[ig];
+        float rain;
+        if (sigma <= 0.0f) {
+            rain = 0.0f;                // RAIN keeps its preset 0
+        } else {
+            int sb = __float_as_int(sigma), eb = __float_as_int(er);
+            int j = 0;
+            while (j < ns && !(sk[j] == sb && ek[j] == eb))
+                ++j;
+            if (j < ns) {
+                rain = rk[j];
+            } else {
+                if (!have_q) {
+                    q = sin32(delta);
+                    have_q = true;
+                }
+                rain = ground_loss_ray_(
+                    ground_area_memo_(memo, sigma, er, fmc), er, delta,
+                    cosd, q);
+                if (ns < 5) {
+                    sk[ns] = sb; ek[ns] = eb; rk[ns] = rain; ++ns;
+                }
+            }
+        }
+        y = y + rain;
+    }
+    return y;
 }
 
 // GAIN's DO-10 scan: first /cantenna/ entry for terminal `itr` covering fmc.
