@@ -77,7 +77,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from voacap_gpu import engine as _engine
+from voacap_gpu import antennas as _antennas
+from voacap_gpu import backends as _backends
+from voacap_gpu import circuit as _circuit
+from voacap_gpu import endpoint as _endpoint
+from voacap_gpu import results as _results
+from voacap_gpu import rigcache as _rigcache
+from voacap_gpu import system as _system
 from voacap_gpu import validate as _validate
 from voacap_gpu.scalar.f32math import F32
 from voacap_gpu.scalar.sonstate import LAYTYP
@@ -141,11 +147,11 @@ class BatchResults:
         """``mode`` as the 2-character LAYTYP labels ('' for none), object."""
         return _MODE_OBJ[self.mode]
 
-    def circuit(self, i) -> "_engine.Results":
+    def circuit(self, i) -> "_results.Results":
         """Circuit ``i`` as an :class:`engine.Results` -- the very object
         ``predict`` returns for it (equal field for field, bit for bit)."""
         i = int(i)
-        return _engine.Results(
+        return _results.Results(
             hours=self.hours.copy(), freqs=self.freqs.copy(),
             muf=self.muf[i].copy(), fot=self.fot[i].copy(),
             hpf=self.hpf[i].copy(), luf=self.luf[i].copy(),
@@ -277,8 +283,8 @@ def _offazims(txs, rxs, long_path, bearings, end):
             if ztaz >= 360.0:
                 ztaz = F32(ztaz - F32(360.0))
         b = bearings[k]
-        out[k] = _engine._antcalc_offazim(ztaz,
-                                          None if np.isnan(b) else float(b))
+        out[k] = _antennas._antcalc_offazim(ztaz,
+                                            None if np.isnan(b) else float(b))
     return out
 
 
@@ -324,7 +330,7 @@ class _Antennas:
         self.n = len(txs)
         b0 = (None if np.isnan(txb[0]) else float(txb[0]),
               None if np.isnan(rxb[0]) else float(rxb[0]))
-        self.template = _engine.antcalc_cant(
+        self.template = _antennas.antcalc_cant(
             tx_ant, rx_ant, tuple(txs[0]), tuple(rxs[0]),
             power_kw=system.power_kw, tx_gos=system.tx_gos,
             rx_gos=system.rx_gos, tx_bearing=b0[0], rx_bearing=b0[1],
@@ -334,7 +340,7 @@ class _Antennas:
             for b in np.unique(bs[~np.isnan(bs)]):
                 if (ant is not None and ant.jant == 13
                         and b not in [x for x in b0 if x is not None]):
-                    _engine._check_bearing(end, ant, float(b))
+                    _antennas._check_bearing(end, ant, float(b))
         self.ends = []                      # (iat, ant, offs, absolute, gos)
         if tx_ant is not None and tx_ant.jant == 13:
             self.ends.append((1, tx_ant, _offazims(txs, rxs, long_path, txb,
@@ -399,7 +405,7 @@ class _Antennas:
 def predict_batch(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
                   tx_antenna=None, rx_antenna=None, tx_bearing=None,
                   rx_bearing=None, system=None, method=30, model=None,
-                  coeff="CCIR", pole=_engine.POLE_DEFAULT, long_path=False,
+                  coeff="CCIR", pole=_system.POLE_DEFAULT, long_path=False,
                   fast_math=False, tx_antenna_freq_range=(2, 30),
                   rx_antenna_freq_range=(2, 30), tx_table_absolute=False,
                   rx_table_absolute=False, backend="cuda", order="spatial",
@@ -412,12 +418,12 @@ def predict_batch(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
     ``chunk`` (circuit-hours per launch, default ``DEFAULT_CHUNK``) and
     ``nstreams`` (default ``DEFAULT_STREAMS``).  Raises as ``predict`` does.
     """
-    backend = _engine._resolve_backend(backend, fast_math)
+    backend = _backends._resolve_backend(backend, fast_math)
     if order not in ("spatial", "none"):
         raise ValueError(f"order={order!r}: expected 'spatial' or 'none'")
-    system = system or _engine.System()
+    system = system or _system.System()
     _validate.check_coeff(coeff)
-    coeff, system = _engine._resolve_model(model, coeff, system)
+    coeff, system = _circuit._resolve_model(model, coeff, system)
     _validate.check_system(system)
     txs, tx1 = _points("tx", tx)
     rxs, rx1 = _points("rx", rx)
@@ -448,8 +454,8 @@ def predict_batch(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
               rx_freq_range=rx_antenna_freq_range,
               tx_table_absolute=tx_table_absolute,
               rx_table_absolute=rx_table_absolute)
-    tx_ant = _engine._parse_antenna(tx_antenna)
-    rx_ant = _engine._parse_antenna(rx_antenna)
+    tx_ant = _antennas._parse_antenna(tx_antenna)
+    rx_ant = _antennas._parse_antenna(rx_antenna)
 
     if backend == "cpu":
         # the antenna checks / warnings, once, as the CUDA path makes them
@@ -459,8 +465,8 @@ def predict_batch(tx, rx, *, freqs, month, ssn, hours=range(1, 25),
 
     ants = _Antennas(tx_ant, rx_ant, txs, rxs, lp, txb, rxb, system, kw,
                      freqs_f)
-    cfg = _engine.setup_config(system, method=method, freqs=freqs_f,
-                               pole=pole).reshape(1)
+    cfg = _circuit.setup_config(system, method=method, freqs=freqs_f,
+                                pole=pole).reshape(1)
     return _run_cuda(echo, ants, cfg, order, fast_math,
                      chunk or DEFAULT_CHUNK, nstreams or DEFAULT_STREAMS)
 
@@ -570,17 +576,18 @@ def _run_cuda(echo, ants, cfg, order, fast_math, chunk, nstreams):
         p = params[a:b]
         if b - a <= SMALL_ROWS:
             width = max(32, 1 << int(np.ceil(np.log2(b - a))))
-            rig, lock = _engine._small_rig(width, coeff, month, ssn,
-                                           fast_math)
+            rig, lock = _rigcache._small_rig(width, coeff, month, ssn,
+                                             fast_math)
             with lock:
                 res, muf3 = rig.run(p, cfg, ant_idx, ant=ant)
             _scatter(out, rows, res.son, res.status, muf3, nf)
             continue
-        ikey, slot, tables = _engine._device_iono(coeff, month, ssn)
-        key = (_engine._device_id(), int(chunk), int(nstreams),
+        ikey, slot, tables = _rigcache._device_iono(coeff, month, ssn)
+        key = (_rigcache._device_id(), int(chunk), int(nstreams),
                bool(fast_math))
-        rig, lock = _engine._BATCH_RIGS.get(key, lambda: PipelinedSetupLuffy(
-            int(chunk), int(nstreams), fast_math=bool(fast_math)))
+        rig, lock = _rigcache._BATCH_RIGS.get(
+            key, lambda: PipelinedSetupLuffy(
+                int(chunk), int(nstreams), fast_math=bool(fast_math)))
 
         def on_chunk(lo, hi, res, muf3, rows=rows):
             _scatter(out, rows[lo:hi], res.son, res.status, muf3, nf)
@@ -601,7 +608,7 @@ def _run_cpu(echo, tx_antenna, rx_antenna, kw, fast_math):
         tb, rb = echo["tx_bearing"][i], echo["rx_bearing"][i]
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")     # already warned once above
-            r = _engine.predict(
+            r = _endpoint.predict(
                 tuple(echo["tx"][i]), tuple(echo["rx"][i]),
                 freqs=echo["freqs"], month=echo["month"], ssn=echo["ssn"],
                 hours=echo["hours"], tx_antenna=tx_antenna,

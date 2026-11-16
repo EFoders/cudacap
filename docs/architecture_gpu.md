@@ -76,7 +76,8 @@ chain with the GPU kernel:
 2. **Pack the measured input set.** A whole `CircuitState` is **55,652 bytes**,
    but almost all of it is scratch that LUFFY fills itself (`/RAYS/` `IFOB`
    alone is 30,504 bytes — 55% — and is pure scratch). Only **3,228 bytes** are
-   read before being written; those are the `UPLOAD_FIELDS` in `cuda/driver.py`,
+   read before being written; those are the `UPLOAD_FIELDS` in `cuda/abi.py`
+   (re-exported by `cuda/driver.py`),
    established experimentally by zeroing each field across all 504 replay
    circuit-hours and diffing the output. The pack (`pack_circuit`) crosses only
    those. `/RAYS/` travels in its own **structure-of-arrays** device buffers

@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 
-from voacap_gpu import engine
+from voacap_gpu import endpoint, engine
 from voacap_gpu.engine import (Results, System, _assemble, antcalc_cant,
                                build_circuit, predict, predict_circuits)
 from voacap_gpu.gridjob import CellReducer
@@ -76,23 +76,54 @@ def _assert_masked(r, invalid):
 # Task 1: status reaches Results
 # ---------------------------------------------------------------------------
 
+def _pin_path(monkeypatch, path):
+    """Pin ``predict(backend='cuda')`` to one of its two paths, with the
+    other booby-trapped.  The device-setup path is what predict takes; the
+    host-build path (build_circuit per hour + predict_circuits) is reached by
+    replacing the routing predicate, ``endpoint._device_path_ok``."""
+    def trap(*a, **k):
+        raise AssertionError(f"predict left the {path} path")
+
+    if path == "host":
+        monkeypatch.setattr(endpoint, "_device_path_ok",
+                            lambda long_path: False)
+        monkeypatch.setattr(endpoint, "_predict_device", trap)
+    else:
+        monkeypatch.setattr(endpoint, "_predict_host", trap)
+
+
 @requires_cuda
-def test_kernel_refusal_reaches_results_through_predict(monkeypatch):
+@pytest.mark.parametrize("path", ["device", "host"])
+def test_kernel_refusal_reaches_results_through_predict(monkeypatch, path):
     """An area-coverage receive antenna (OFFAZIM == -999) is unported: GAIN
     flags it (oob_flag 2) and GENOIS turns that into status 303
     (STATUS_GENOIS_AREA_COVERAGE) on the very
     first frequency.  predict() must carry that status into Results, and the
-    whole hour must be invalid.
+    whole hour must be invalid -- on either path.
 
-    The sentinel goes in AFTER build_circuit, which writes OFFAZIM itself."""
-    real = engine.build_circuit
+    The sentinel goes in AFTER the code that writes OFFAZIM itself: on the
+    host path after build_circuit (into the circuit's cant), on the device
+    path after antcalc_cant (into the cant predict ships as the device
+    antenna table; the device path never calls build_circuit)."""
+    if path == "host":
+        real = endpoint.build_circuit
 
-    def area_coverage(*a, **kw):
-        c, ip = real(*a, **kw)
-        c.cant.offazim[2] = AREA_COVERAGE          # the receive entry
-        return c, ip
+        def area_coverage(*a, **kw):
+            c, ip = real(*a, **kw)
+            c.cant.offazim[2] = AREA_COVERAGE      # the receive entry
+            return c, ip
 
-    monkeypatch.setattr(engine, "build_circuit", area_coverage)
+        monkeypatch.setattr(endpoint, "build_circuit", area_coverage)
+    else:
+        real = endpoint.antcalc_cant
+
+        def area_coverage(*a, **kw):
+            cant = real(*a, **kw)
+            cant.offazim[2] = AREA_COVERAGE        # the receive entry
+            return cant
+
+        monkeypatch.setattr(endpoint, "antcalc_cant", area_coverage)
+    _pin_path(monkeypatch, path)
     r = predict(LONDON, PARIS, freqs=[7.0, 14.0], month=6, ssn=100,
                 hours=[1, 13])
     assert r.status.dtype == np.int32 and r.status.shape == (2,)
@@ -105,18 +136,47 @@ def test_kernel_refusal_reaches_results_through_predict(monkeypatch):
     assert rec["valid"] is False
 
 
-@requires_cuda
-def test_status_from_predict_circuits_is_not_discarded(monkeypatch):
-    """Whatever predict_circuits returns is what Results carries, per hour."""
-    real = engine.predict_circuits
+class _StatusInjectingRig:
+    """A device rig whose ``run`` returns the real answer with hour row 1's
+    status replaced -- the device path's counterpart of a predict_circuits
+    that reports a refusal."""
 
-    def fake(circuits, ipflags, fast_math=False):
-        circuits, status = real(circuits, ipflags, fast_math=fast_math)
-        status = np.array(status, np.int32)
+    def __init__(self, rig):
+        self._rig = rig
+
+    def run(self, *a, **kw):
+        res, muf3 = self._rig.run(*a, **kw)
+        status = np.array(res.status, np.int32)
         status[1] = engine.STATUS_LUFFY_BAD_NMODE2
-        return circuits, status
+        res.status = status
+        return res, muf3
 
-    monkeypatch.setattr(engine, "predict_circuits", fake)
+
+@requires_cuda
+@pytest.mark.parametrize("path", ["device", "host"])
+def test_status_from_predict_circuits_is_not_discarded(monkeypatch, path):
+    """Whatever the LUFFY launch returns is what Results carries, per hour:
+    predict_circuits' status on the host path, the device rig's on the
+    device path."""
+    if path == "host":
+        real = endpoint.predict_circuits
+
+        def fake(circuits, ipflags, fast_math=False):
+            circuits, status = real(circuits, ipflags, fast_math=fast_math)
+            status = np.array(status, np.int32)
+            status[1] = engine.STATUS_LUFFY_BAD_NMODE2
+            return circuits, status
+
+        monkeypatch.setattr(endpoint, "predict_circuits", fake)
+    else:
+        real = endpoint._small_rig
+
+        def small_rig(*a, **kw):
+            rig, lock = real(*a, **kw)
+            return _StatusInjectingRig(rig), lock
+
+        monkeypatch.setattr(endpoint, "_small_rig", small_rig)
+    _pin_path(monkeypatch, path)
     r = predict(LONDON, PARIS, freqs=[7.0, 14.0], month=6, ssn=100,
                 hours=[1, 2, 3])
     assert r.status.tolist() == [0, engine.STATUS_LUFFY_BAD_NMODE2, 0]

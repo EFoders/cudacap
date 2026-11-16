@@ -281,7 +281,10 @@ like-for-like table.
 ## Layout
 
 - `src/voacap_gpu/` — `scalar/`, `batched/`, `cuda/`, `engine.py`, and
-  `data/coeffs/` (the bundled CCIR/URSI coefficient files).
+  `data/coeffs/` (the bundled CCIR/URSI coefficient files). `engine.py` is a
+  facade: the endpoint's code lives in `system.py`, `status.py`,
+  `antennas.py`, `circuit.py`, `backends.py`, `results.py`, `rigcache.py` and
+  `endpoint.py`, and every name is still importable from `voacap_gpu.engine`.
 - `golden/` — oracle outputs from voacapl: end-to-end decks and outputs
   (`p2p/`), per-routine and LUFFY dumps (`dumps/`), coefficient binaries
   (`coeffs/`).

@@ -5,10 +5,11 @@ builds every hour's circuit from 32-byte parameter rows and the
 warp-per-circuit-hour LUFFY kernel runs on it in place (engine, THE CUDA
 PATH).  The host-build path it replaced -- ``build_circuit`` per hour, pack,
 the thread-per-circuit kernel, unpack, ``_assemble`` -- is still in the
-engine (``_predict_host``), and ``predict`` takes it whenever a host hook has
-been replaced.  These tests use exactly that to get "today's predict()" as the
-reference, and require EVERY Results field to be identical, bitwise for the
-floats (NaN patterns included), on:
+endpoint (``_predict_host``; the CPU backend's path).  These tests reach it on
+CUDA by replacing predict's routing predicate (``endpoint._device_path_ok``)
+to get the pre-device-path predict() as the reference, and require EVERY
+Results field to be identical, bitwise for the floats (NaN patterns
+included), on:
 
 * the raw inputs (CIRCUIT card, SYSTEM, METHOD, coefficient set, month, SSN,
   frequencies, hours) of every captured LUFFY oracle deck -- the same decks
@@ -30,7 +31,7 @@ import warnings
 import numpy as np
 import pytest
 
-from voacap_gpu import engine
+from voacap_gpu import endpoint, engine
 from voacap_gpu.engine import System, predict
 
 from tests.test_engine import ALL_DECKS, _deck_inputs
@@ -63,16 +64,15 @@ def assert_results_identical(got, want, what=""):
 
 
 def _host_predict(monkeypatch, *args, **kwargs):
-    """``predict`` on the HOST-build path: replacing ``predict_circuits``
-    (with an exact pass-through) is what makes predict take it."""
-    real = engine._PREDICT_CIRCUITS
-
-    def passthrough(circuits, ipflags, fast_math=False):
-        return real(circuits, ipflags, fast_math=fast_math)
+    """``predict`` on the HOST-build path: the routing predicate says "no
+    device path", and the device path is booby-trapped so a silent use of it
+    cannot pass for the host path."""
+    def trap(*a, **k):
+        raise AssertionError("predict took the device-setup path")
 
     with monkeypatch.context() as m:
-        m.setattr(engine, "predict_circuits", passthrough)
-        assert not engine._device_path_ok(False)
+        m.setattr(endpoint, "_device_path_ok", lambda long_path: False)
+        m.setattr(endpoint, "_predict_device", trap)
         return predict(*args, **kwargs)
 
 
@@ -83,8 +83,8 @@ def _fast_predict(monkeypatch, *args, **kwargs):
         raise AssertionError("predict took the host-build path")
 
     with monkeypatch.context() as m:
-        m.setattr(engine, "_predict_host", trap)
-        assert engine._device_path_ok(False)
+        m.setattr(endpoint, "_predict_host", trap)
+        assert endpoint._device_path_ok(False)
         return predict(*args, **kwargs)
 
 
@@ -307,11 +307,11 @@ def test_cpu_backend_unchanged():
     def trap(*a, **k):
         raise AssertionError("CPU backend took the device path")
 
-    real = engine._predict_device
-    engine._predict_device = trap
+    real = endpoint._predict_device
+    endpoint._predict_device = trap
     try:
         r = predict((51.50, -0.13), (48.85, 2.35), freqs=[7.0], month=6,
                     ssn=100, hours=[12], backend="cpu")
     finally:
-        engine._predict_device = real
+        endpoint._predict_device = real
     assert r.valid.all()

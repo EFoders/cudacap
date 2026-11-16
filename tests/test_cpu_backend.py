@@ -24,7 +24,7 @@ import warnings
 import numpy as np
 import pytest
 
-from voacap_gpu import engine
+from voacap_gpu import backends, endpoint
 from voacap_gpu.engine import (STATUS_CPU_UNMAPPED,
                                STATUS_GENOIS_AREA_COVERAGE,
                                STATUS_GENOIS_GAIN_OOB, System, build_circuit,
@@ -165,7 +165,8 @@ def test_unknown_backend_refused():
 
 
 def test_auto_falls_back_with_warning(monkeypatch):
-    monkeypatch.setattr(engine, "_cuda_usable", lambda: False)
+    # _resolve_backend looks _cuda_usable up in voacap_gpu.backends
+    monkeypatch.setattr(backends, "_cuda_usable", lambda: False)
     with pytest.warns(UserWarning, match="falling back.*1000x slower"):
         a = predict(LONDON, PARIS, backend="auto", **_KW)
     b = predict(LONDON, PARIS, backend="cpu", **_KW)
@@ -173,7 +174,8 @@ def test_auto_falls_back_with_warning(monkeypatch):
 
 
 def test_auto_fast_math_without_gpu_refused(monkeypatch):
-    monkeypatch.setattr(engine, "_cuda_usable", lambda: False)
+    # _resolve_backend looks _cuda_usable up in voacap_gpu.backends
+    monkeypatch.setattr(backends, "_cuda_usable", lambda: False)
     with pytest.warns(UserWarning), pytest.raises(ValueError,
                                                    match="fast_math"):
         predict(LONDON, PARIS, backend="auto", fast_math=True, **_KW)
@@ -181,16 +183,18 @@ def test_auto_fast_math_without_gpu_refused(monkeypatch):
 
 def test_auto_uses_cuda_when_usable(monkeypatch):
     """With a device, 'auto' is the CUDA path: no warning, and it goes
-    through predict_circuits (which the CPU path never calls)."""
+    through the device-setup path, _predict_device (which the CPU backend
+    never takes; it is how predict(backend='cuda') reaches the kernel for an
+    ordinary circuit), once, for the one requested hour."""
     _require_cuda()
     calls = []
-    real = engine.predict_circuits
+    real = endpoint._predict_device
 
-    def spy(circuits, ipflags, fast_math=False):
-        calls.append(len(circuits))
-        return real(circuits, ipflags, fast_math=fast_math)
+    def spy(tx, rx, hours, *a, **kw):
+        calls.append(len(hours))
+        return real(tx, rx, hours, *a, **kw)
 
-    monkeypatch.setattr(engine, "predict_circuits", spy)
+    monkeypatch.setattr(endpoint, "_predict_device", spy)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         predict(LONDON, PARIS, backend="auto", **_KW)
@@ -250,14 +254,14 @@ def test_cpu_status_equals_cuda_status(case):
 
 def test_cpu_refusal_reaches_results_through_predict(monkeypatch):
     """As test_results' GPU twin: status 303 for every hour, nothing valid."""
-    real = engine.build_circuit
+    real = endpoint.build_circuit             # what _predict_host calls
 
     def area_coverage(*a, **kw):
         c, ip = real(*a, **kw)
         c.cant.offazim[2] = AREA_COVERAGE
         return c, ip
 
-    monkeypatch.setattr(engine, "build_circuit", area_coverage)
+    monkeypatch.setattr(endpoint, "build_circuit", area_coverage)
     r = predict(LONDON, PARIS, freqs=[7.0, 14.0], month=6, ssn=100,
                 hours=[1, 13], backend="cpu")
     assert r.status.tolist() == [STATUS_GENOIS_AREA_COVERAGE] * 2

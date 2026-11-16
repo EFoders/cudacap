@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 
 from voacap_gpu import engine
-from voacap_gpu.cuda import driver
+from voacap_gpu.cuda import driver, setup_rigs
 from voacap_gpu.cuda.driver import (SETUP_CONFIG_DTYPE, SETUP_PARAMS_DTYPE,
                                        IonoSlot, LuffyArena, PipelinedLuffy,
                                        PipelinedSetupLuffy, SetupLuffy,
@@ -625,7 +625,8 @@ def test_device_hour_guard(small_setup, monkeypatch):
     bad_rows = np.array([1, 5, 9, 30])
     q = p.copy()
     q["hour"][bad_rows] = (60, 25, 0, -3)
-    monkeypatch.setattr(driver, "_check_setup_params",
+    # patched where the rigs look it up (setup_rigs), not on the facade
+    monkeypatch.setattr(setup_rigs, "_check_setup_params",
                         lambda params, *a, **k: params)   # bypass, pass through
     got_s = SetupLuffy(64, slots, iono, ant).run(q, cfgs, ant_idx)
     got_p = PipelinedSetupLuffy(16, 2, slots, iono).run(q, cfgs, ant, ant_idx)

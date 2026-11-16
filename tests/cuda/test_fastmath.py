@@ -101,6 +101,7 @@ import numpy as np
 import pytest
 
 import voacap_gpu.cuda.driver as drv
+from voacap_gpu.cuda import luffy_rigs
 from voacap_gpu.scalar import f32math as fm
 from voacap_gpu.cuda.compile import load
 from voacap_gpu.cuda.state import RAYS_DTYPE
@@ -178,16 +179,17 @@ def fast_kernel_module(groups=1, fast_math=False):
 def fast_math():
     """Make ``driver.stage_luffy`` pick up the fast-math module.
 
-    driver.py is not modified: ``stage_luffy`` looks ``load_kernel`` up in its
-    own module globals on every call, so swapping it here redirects the launch
-    and nothing else.
+    The driver is not modified: ``stage_luffy`` looks ``load_kernel`` up in
+    its own module globals (``cuda/luffy_rigs.py``; ``driver`` is only a
+    re-exporting facade) on every call, so swapping it THERE redirects the
+    launch and nothing else.
     """
-    orig = drv.load_kernel
-    drv.load_kernel = fast_kernel_module
+    orig = luffy_rigs.load_kernel
+    luffy_rigs.load_kernel = fast_kernel_module
     try:
         yield
     finally:
-        drv.load_kernel = orig
+        luffy_rigs.load_kernel = orig
 
 
 _RUNS = {}

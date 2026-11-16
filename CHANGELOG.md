@@ -50,6 +50,17 @@ type-13/14 antenna workloads, generated before the changes.
   Bit-exact mode is unaffected.
 - `real_world_compare.py` and `tools/results/fortran_baseline.md` are marked
   LEGACY; `tools/bench_vs_fortran/` is the like-for-like benchmark.
+- **Module layout.** `engine.py` and `cuda/driver.py` are now facades over
+  smaller modules (`system`, `status`, `antennas`, `circuit`, `backends`,
+  `results`, `rigcache`, `endpoint`; `cuda/abi`, `checks`, `tables`,
+  `kernels`, `results`, `luffy_rigs`, `setup_rigs`). Every name importable
+  from either facade before still is (pinned by `tests/test_engine_facade.py`
+  and `tests/cuda/test_driver_facade.py`). Assigning to or monkeypatching a
+  facade attribute (`engine.build_circuit = ...`, `engine._COEFFS_DIR = ...`,
+  `driver.load_kernel = ...`) no longer affects the code: patch the module
+  that looks the name up (see each facade's docstring). `predict()` no longer
+  detects a patched `build_circuit`/`predict_circuits` and falls back to the
+  host path.
 
 ## 0.1.0 — 2026-11-15
 
