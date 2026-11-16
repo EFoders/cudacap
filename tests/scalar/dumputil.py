@@ -5,11 +5,28 @@ import pathlib
 
 import numpy as np
 
-GOLDEN = pathlib.Path(__file__).resolve().parents[2] / "golden" / "dumps"
-COEFFS_DIR = (pathlib.Path(__file__).resolve().parents[2] / "reference"
-              / "voacapl" / "voacapl" / "itshfbc" / "coeffs")
-ANTENNAS_DIR = (pathlib.Path(__file__).resolve().parents[2] / "reference"
-                / "voacapl" / "voacapl" / "itshfbc" / "antennas" / "samples")
+import voacap_gpu
+
+REPO = pathlib.Path(__file__).resolve().parents[2]
+GOLDEN = REPO / "golden" / "dumps"
+
+# The vendored Fortran tree.  Dev-only (removed from the distributed tree in
+# 477dad7); tests that genuinely need it are marked ``oracle`` and skipped by
+# tests/conftest.py when it is absent.
+REFERENCE = REPO / "reference"
+REFERENCE_ITSHFBC = REFERENCE / "voacapl" / "voacapl" / "itshfbc"
+REFERENCE_COEFFS_DIR = REFERENCE_ITSHFBC / "coeffs"
+REFERENCE_ANTENNAS_DIR = REFERENCE_ITSHFBC / "antennas" / "samples"
+
+# The CCIR/URSI coefficients the PACKAGE ships (engine._COEFFS_DIR; pinned
+# byte-identical to the vendored .asc sources by tests/test_packaging.py), so
+# the dump tests need no reference/ tree.
+COEFFS_DIR = pathlib.Path(voacap_gpu.__file__).resolve().parent / "data" / "coeffs"
+
+# Byte-exact copies of the stock voacapl sample antennas the tests read
+# (provenance in tests/data/README.md).  Only the small ones are copied;
+# sample.13 (269 KB) is read from REFERENCE_ANTENNAS_DIR by an oracle test.
+ANTENNAS_DIR = REPO / "tests" / "data" / "antennas"
 
 
 def load_dump(name):

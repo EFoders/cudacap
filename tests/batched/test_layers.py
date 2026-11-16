@@ -22,9 +22,11 @@ from voacap_gpu.scalar.redmap import redmap
 from voacap_gpu.scalar.virtim import virtim
 from voacap_gpu.batched.layers import iono_params_batch
 
+from tests.scalar.dumputil import COEFFS_DIR
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "golden" / "dumps" / "layers"
-COEFFS = ROOT / "reference" / "voacapl" / "voacapl" / "itshfbc" / "coeffs"
+COEFFS = COEFFS_DIR    # the package's bundled copy (tests/scalar/dumputil.py)
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 F32 = np.float32
 

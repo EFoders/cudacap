@@ -7,6 +7,9 @@ comments excluded). This is the normative reference for dtype choices in the
 port: **everything not listed here is `REAL*4` (Fortran default REAL) and is
 ported as float32.**
 
+> The `reference/` tree is no longer in the working tree (removed in commit
+> `477dad7`). Restore it with `git checkout 477dad7^ -- reference`.
+
 Notably, there are **zero** `DBLE(...)` promotions inside expressions
 anywhere in the codebase — double precision appears only via the whole-scope
 declarations below.

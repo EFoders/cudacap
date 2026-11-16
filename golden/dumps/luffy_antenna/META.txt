@@ -1,0 +1,22 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero -I ../modules/ -g -O2 -std=legacy -fallow-argument-mismatch     (taken from the real voacapl link line)
+method: LUFFY shimmed into the real voacapl (dump_luffy.f provides
+        LUFFY, the real one is relinked as LUFFYR).  Everything else
+        -- DECRED, REDMAP, GEOM, SANG, CURMUF, the hour loop -- is
+        the stock program, so the captured state is what a real deck
+        produces rather than what a case generator imagines.
+decks: range320_latok_m10_s160 t13long_lonakl_m01_s100 t13off180_sydstg_m10_s100_ursi t13off30_tanbel_m07_s160 t13off90_toksyd_m01_s15 t13on_latok_m04_s100 t13rx_fbahel_m07_s100_v20 t13wrap360_madmos_m10_s100 t13wrap_tanbel_m04_s60 t14both_fbahel_m10_s160 t14rx_lonpar_m07_s15 t14tx_tanbel_m01_s100
+files: <deck>_in.csv  = LUFFY's entry state, one row per call
+       <deck>_out.csv = /SON/ + XLUF + JMODE at exit, same rows
+       <deck>_ant.csv = /cantenna/ + /pantenna/, one row per antenna
+                        and frequency; captured because OFFAZIM comes
+                        from ANTCALC, not from the antenna file.
+NOT captured: the coefficient maps (loaded
+  Python-side by REDMAP, already validated), and /SON/
+  MODE and MDL, which are CHARACTER and feed only the output tables.
+generated: 2026-11-15T22:34:09Z
+antenna files (sha256, from /home/foden/itshfbc_ant/antennas):
+  fc524cd86fbf575ab454c1df7af03e87f3bff1fb884ae691b95b5ada588a668c  samples/sample.00
+  2e70b96023b4dbbfe37992ce8b57f15aad3491c9a9efac7bf37ad5be61130282  samples/sample.13
+  9b60054ddacc84db313eb738c95c863e9a763e2158d4ecd0a6a7c139fb28df27  samples/sample.14
+  7667680e46eb45f1b6380161c833fa58b7993f5f65aadef2aa9ede851fb7ef53  samples/sample.14x

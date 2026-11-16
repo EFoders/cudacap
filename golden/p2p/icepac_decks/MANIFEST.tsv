@@ -1,0 +1,14 @@
+name	path	month	ssn	method	npsl	km	covers
+lonpar_m04_s15_v30_ice	lonpar	4	15	30	0	343	short path (<2000 km), spring, SSN low
+trolyr_m07_s100_v30_ice	trolyr	7	100	30	0	958	high-latitude short path (both ends >69N), summer
+ushrot_m01_s160_v30_ice	ushrot	1	160	30	0	1420	southern high latitude, near-meridional path (KNOWN OUT OF BOUNDS: GEOM f32 conditioning)
+punbel_m01_s160_v30_ice	punbel	1	160	30	0	1227	southern high latitude (RX 62.2S), austral summer, SSN high
+sinclb_m10_s160_v30_ice	sinclb	10	160	30	0	2727	equatorial (both ends <7N), equinox, SSN high
+tanbel_m04_s100_v25_ice	tanbel	4	100	25	0	2441	METHOD 25, mid-latitude ~2400 km
+fbahel_m01_s160_v20_ice	fbahel	1	160	20	0	6100	METHOD 20, auroral/high-latitude, winter, SSN high
+fbahel_m07_s15_v30_ice	fbahel	7	15	30	0	6100	auroral/high-latitude, summer, SSN low
+latok_m04_s160_v30_ice	latok	4	160	30	0	8809	7000-10000 km smoothing band, spring, SSN high
+latok_m07_s100_v20_ice	latok	7	100	20	0	8809	METHOD 20 in the smoothing distance (MSPEC 0: short model only)
+toksyd_m10_s15_v30_ice	toksyd	10	15	30	0	7823	smoothing band, trans-equatorial, SSN low
+sydstg_m07_s100_v30_ice	sydstg	7	100	30	0	11345	>10000 km (long model), southern winter
+lonakl_m10_s160_v30_long_ice	lonakl	10	160	30	1	21690	long path (NPSL=1, ~21700 km), SSN high

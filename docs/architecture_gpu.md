@@ -214,10 +214,19 @@ PCIe legs + kernel) for **161,280 circuit-hours**:
 | Fortran 32 cores | ~6,518 ms | 1× |
 | Fortran 1 core | ~112,000 ms | — |
 
-So the production GPU path is roughly **15× a 32-core box** with fast-math, and
-about **9× bit-exact** — against 1 core, hundreds of times faster. (Kernel-only,
-the thread kernel is 66× one Fortran core at 32k threads and 97× at 129k; divide
-by 32 for the whole-machine comparison.)
+These ratios are **not like-for-like**. The GPU rows replay pre-built captured
+circuits, so geometry, ionosphere and MUF setup are not timed. The Fortran
+figure comes from a 28-frequency deck and includes one process start-up per
+circuit, while the replayed circuit-hours carry about 10 frequencies.
+`tools/bench_stage_c.py` normalises per (circuit, hour, frequency) and is the
+fairer comparison. The production path including device-side setup was
+measured separately at about 292,000 circuit-hours/s bit-exact and 371,000
+with fast-math (2° world grid, 395,304 circuit-hours × 9 frequencies, RTX
+5080), against 63,700 for 32-thread Fortran on the identical workload; see the
+README's Performance section.
+
+Kernel-only and normalised per (circuit, hour, frequency), the thread kernel is
+66× one Fortran core at 32k threads and 97× at 129k (`tools/bench_stage_c.py`).
 
 ## The validation story
 

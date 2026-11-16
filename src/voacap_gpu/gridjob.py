@@ -33,6 +33,9 @@ voacap_grid.go) exactly, including the parts that are easy to get wrong:
   mean only when their frequency equals the current best's.
 * **A failed circuit contributes nothing at all** -- ``status != 0`` skips the
   whole circuit, every frequency of it, rather than scoring it badly.
+  (One extension, not in the Go: a single sample with a non-finite score or
+  value -- a not-computed cell, which ``engine.Results`` reports as NaN --
+  is dropped the same way.  See :meth:`CellReducer.feed`.)
 
 Rather than replay that scan sample by sample, the same answer falls out of
 two vector passes, which is what makes it affordable: the winner is the FIRST
@@ -167,10 +170,27 @@ class CellReducer:
         which is what makes the fancy-indexed writes below unambiguous.  ``ok``
         is the per-circuit success mask (a failed circuit contributes nothing).
         ``rel`` is already the 0..100 percentage PropServer aggregates on.
+
+        A sample whose score or any of its four values is non-finite (NaN or
+        +-inf) is treated as NOT ok: it contributes nothing, exactly like a
+        failed circuit.  This EXTENDS PropServer's semantics -- the Go never
+        saw NaN, because its samples never carried one -- and is needed now
+        that ``engine.Results`` reports a not-computed (hour, frequency) cell
+        as NaN: a NaN would otherwise poison the hourly sums, and a ``-inf``
+        or ``+inf`` would win or lose the max for the wrong reason.  For all-
+        finite input ``ok`` is unchanged, so the reduction is bit-identical to
+        the Go transcription.  A caller feeding raw /SON/ values rather than
+        ``Results`` must fold ``Results.valid`` (or ``nhp >= 1``) into ``ok``
+        itself: a not-computed slot's raw dbw is a finite 0 dBW preset, which
+        would otherwise win every cell.
         """
         cells = np.asarray(cells, np.int64)
         metric = {"snr": snr, "dbw": dbw, "dbu": dbu, "reliab": rel}[self.goal]
         score = np.asarray(metric, F64)
+        finite = np.isfinite(score)
+        for v in (snr, dbw, dbu, rel):
+            finite = finite & np.isfinite(np.asarray(v, F64))
+        ok = np.asarray(ok, bool) & finite
 
         # --- a new best: adopt it and RESTART the hourly accumulator --------
         # `not has or score > bestScore`, strictly greater, so a tie keeps the

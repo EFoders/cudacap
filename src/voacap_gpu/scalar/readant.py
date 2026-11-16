@@ -56,7 +56,13 @@ class AntennaFile:
 
     description: str
     nparm: int
-    parm: np.ndarray                  # (20,) float32, /ccirparm/ parm
+    # (20,) float32, /ccirparm/ parm.  For the table types, parm[0] (PARM(1),
+    # "Max Gain dBi") is used for exactly one thing in this port: the offset
+    # ANTCALC adds to every tabulated gain -- p2p_tables() (type 14) and
+    # CantennaState.load_p2p_t13 (type 13), both skippable with
+    # absolute=True.  Nothing else in src/ (scalar, batched or CUDA) reads it.
+    # parm[1] is the type (JANT) and parm[2] the type-13 efficiency.
+    parm: np.ndarray
     jant: int
     # exactly one of these is populated, per jant
     gain_type11: np.ndarray = None    # (91,)      float32
@@ -64,17 +70,41 @@ class AntennaFile:
     gains30: np.ndarray = None        # (30, 91)   float32
     eff30: np.ndarray = None          # (30,)      float32
 
-    def p2p_tables(self):
+    def p2p_tables(self, absolute=False):
         """ARRAY(30,91) and AEFF(30) as /cantenna/ holds them, for GAIN.
 
-        ANTCALC adds parm(1) -- the file's "Max Gain dBi" -- to every tabulated
-        gain (antcalc.for:291) and takes AEFF straight from the per-frequency
+        **The table is RELATIVE to header parameter 1.**  ANTCALC adds parm(1)
+        -- the file's "Max Gain dBi" -- to every tabulated gain
+        (antcalc.for:291) and takes AEFF straight from the per-frequency
         efficiency.  Only that offset step belongs to ANTCALC; it lives here
         because it is inseparable from the table's meaning.
+
+        ``absolute=True`` skips the parm(1) add, for tables that are already
+        in absolute dBi (a common export convention that VOACAP would
+        double-count: a flat 5 dB table with header 5 installs +10 dBi).
+
+        All 30 rows are returned; which of them reach /cantenna/ is the
+        ANTENNA card's MINFREQ..MAXFREQ (``CantennaState.load_p2p``).
         """
         if self.jant != 14:
             raise ValueError(f"p2p_tables needs a type 14 file, got {self.jant}")
+        if absolute:
+            return self.gains30.astype(np.float32), self.eff30
         return (self.gains30 + self.parm[0]).astype(np.float32), self.eff30
+
+    def peak_gain_dbi(self, absolute=False) -> float:
+        """The largest gain this file would install, dBi.
+
+        max(table) + parm(1), or max(table) alone with ``absolute=True`` --
+        over the whole table (every frequency row for type 14, every azimuth
+        for type 13), so it does not depend on OFFAZIM or the frequency range.
+        """
+        table = {11: self.gain_type11, 13: self.gains360,
+                 14: self.gains30}.get(self.jant)
+        if table is None:
+            raise ValueError(f"no gain table for antenna type {self.jant}")
+        peak = float(np.max(table))
+        return peak if absolute else peak + float(self.parm[0])
 
 
 def _f_edit(record: str, col: int, width: int, decimals: int) -> F32:

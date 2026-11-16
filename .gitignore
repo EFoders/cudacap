@@ -23,3 +23,7 @@ Desktop.ini
 
 # agent worktrees (transient; git worktree metadata, not project files)
 .claude/worktrees/
+
+# generated benchmark decks
+tools/bench_vs_fortran/decks/
+tools/bench_vs_fortran/bench_gpu.json

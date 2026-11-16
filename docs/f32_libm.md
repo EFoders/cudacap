@@ -37,9 +37,9 @@ folding **is**. So:
 the CCIR geographic series. In the Es coefficient sets, partial sums
 swing to ~|660| while the final GAMMA is ~1.7 — a ~350x cancellation
 amplification. One ULP in GOB (8.8e-8 relative) becomes ~5e-5 absolute
-in GAMMA(1..3). tests/stage_a/test_versy.py carries the measured bars
+in GAMMA(1..3). tests/scalar/test_versy.py carries the measured bars
 and the full story; GEOM's near-pole ACOS amplification
-(tests/stage_a/test_geom.py) is the same phenomenon with a different
+(tests/scalar/test_geom.py) is the same phenomenon with a different
 trigger.
 
 ## Decision: characterize the noise floor, don't chase glibc's bits
@@ -48,7 +48,7 @@ trigger.
 implementation. We deliberately do **not** reimplement glibc's flt-32
 sinf/cosf, for a reason that outranks the 1-ULP mismatch:
 
-- **The production target is the GPU (Stage B).** There the
+- **The production target is the GPU (Stage C, `cuda/`).** There the
   transcendentals are CUDA's, which match neither glibc nor the
   correctly-rounded fallback bit-for-bit. Matching glibc exactly in the
   scalar Stage A leaves would be effort spent on a libm the shipping path

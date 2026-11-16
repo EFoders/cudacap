@@ -25,8 +25,11 @@ from .dumputil import ANTENNAS_DIR, GOLDEN
 
 DUMP = GOLDEN / "readant" / "expected.csv"
 # the inputs are the vendored distribution samples, byte-identical to the ones
-# the oracle read, so they are referenced rather than copied into golden/
+# the oracle read.  sample.11, sample.13 and sample.14 are copied byte-exact
+# into tests/data/antennas (see tests/data/README.md), so none of these tests
+# needs the vendored reference/ tree.
 SAMPLES = ANTENNAS_DIR
+SAMPLES13 = ANTENNAS_DIR
 
 pytestmark = pytest.mark.skipif(
     not DUMP.exists(), reason="oracle dump missing — run "
@@ -61,9 +64,15 @@ def _check(tag, kind, lookup):
     return len(cells)
 
 
-@pytest.mark.parametrize("tag", sorted(FILES))
+def _sample(tag):
+    return (SAMPLES13 if tag == "s13" else SAMPLES) / FILES[tag]
+
+
+@pytest.mark.parametrize("tag", [
+    t
+    for t in sorted(FILES)])
 def test_parm_vs_oracle(tag):
-    ant = read_antenna(SAMPLES / FILES[tag])
+    ant = read_antenna(_sample(tag))
     assert _check(tag, "parm", lambda i, j: ant.parm[i - 1]) == 20
 
 
@@ -74,7 +83,7 @@ def test_type11_table_vs_oracle():
 
 
 def test_type13_table_vs_oracle():
-    ant = read_antenna(SAMPLES / FILES["s13"])
+    ant = read_antenna(_sample("s13"))
     assert ant.jant == 13
     n = _check("s13", "t13", lambda i, j: ant.gains360[i - 1, j - 1])
     assert n == 360 * 91

@@ -1,0 +1,36 @@
+{
+ "device": "NVIDIA GeForce RTX 5080",
+ "world_grid": {
+  "circuit_hours": 395304,
+  "freqs": 9,
+  "runs": {
+   "fast=False chunk=32768x2": {
+    "s": 1.49,
+    "chs": 265263,
+    "mem_gb": 5.1
+   },
+   "fast=False chunk=65536x2": {
+    "s": 1.352,
+    "chs": 292330,
+    "mem_gb": 8.6
+   },
+   "fast=True chunk=32768x2": {
+    "s": 1.101,
+    "chs": 359022,
+    "mem_gb": 5.1
+   },
+   "fast=True chunk=65536x2": {
+    "s": 1.067,
+    "chs": 370578,
+    "mem_gb": 8.6
+   }
+  }
+ },
+ "fortran_workload_gpu": {
+  "circuit_hours": 15360,
+  "s": 0.1008,
+  "chs": 152398
+ },
+ "predict_1x24h_cuda_ms": 143.6,
+ "predict_1x24h_cpu_ms": 1492.4
+}

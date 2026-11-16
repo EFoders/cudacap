@@ -1,0 +1,12 @@
+cpu: Intel(R) Core(TM) i9-14900KF (32 logical), workers: 32
+gfortran: GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+serial_24h_x64 rep1: 0.458 s
+serial_1h_x64 rep1: 0.219 s
+serial_24h_x64 rep2: 0.441 s
+serial_1h_x64 rep2: 0.211 s
+serial_24h_x64 rep3: 0.445 s
+serial_1h_x64 rep3: 0.209 s
+freq_rows_in_a_24h_deck_output: 24
+parallel_24h_x640 rep1: 0.242 s
+parallel_24h_x640 rep2: 0.241 s
+parallel_24h_x640 rep3: 0.242 s

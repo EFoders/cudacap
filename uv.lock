@@ -748,12 +748,16 @@ wheels = [
 
 [[package]]
 name = "voacap-gpu"
-version = "0.0.4"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cupy-cuda12x", extra = ["ctk"] },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+
+[package.optional-dependencies]
+batched = [
     { name = "torch" },
 ]
 
@@ -767,8 +771,9 @@ dev = [
 requires-dist = [
     { name = "cupy-cuda12x", extras = ["ctk"], specifier = ">=14.1.1" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "torch", specifier = ">=2.7", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "torch", marker = "extra == 'batched'", specifier = ">=2.7", index = "https://download.pytorch.org/whl/cu128" },
 ]
+provides-extras = ["batched"]
 
 [package.metadata.requires-dev]
 dev = [

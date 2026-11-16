@@ -8,4 +8,4 @@ Validated module-by-module against the gfortran-built voacapl oracle
 - ``voacap_gpu`` proper (Stage B): vectorized PyTorch implementation.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.1.0"   # keep equal to pyproject.toml [project] version (tests/test_scaffold.py)

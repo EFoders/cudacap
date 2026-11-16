@@ -25,8 +25,10 @@ from voacap_gpu.scalar.timvar import timvar
 from voacap_gpu.scalar.virtim import virtim
 from voacap_gpu.batched.area import POLE_LAT, POLE_LON, area_iono_map
 
+from tests.scalar.dumputil import COEFFS_DIR
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-COEFFS = ROOT / "reference" / "voacapl" / "voacapl" / "itshfbc" / "coeffs"
+COEFFS = COEFFS_DIR    # the package's bundled copy (tests/scalar/dumputil.py)
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 MONTH, SSN, GMT = 4, 120.0, 12.0
 

@@ -1,0 +1,38 @@
+# CPU-only CI.  GitHub-hosted runners have no GPU and no CUDA driver: the
+# CuPy wheel installs, but every CUDA test skips (tests/cuda/harness.py
+# `requires_cuda`).  torch is not installed (no `batched` extra), so
+# tests/batched/ is ignored by its conftest.  Tests that need the Fortran
+# oracle's reference/ tree carry the `oracle` marker and are deselected.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (CPU, Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install (locked, no torch extra)
+        run: uv sync --frozen
+
+      - name: Test
+        run: uv run --frozen pytest -q -m "not oracle"

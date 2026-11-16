@@ -15,12 +15,19 @@
 #   wsl bash tools/oracle/dumps/run_luffy_dumps.sh [deck ...]
 # with deck names (no .dat) from golden/p2p/matrix/decks; default is a
 # short-path set the port can actually replay.
+#
+# Overrides (for parallel or out-of-repo captures): LUFFY_DECKS (deck dir),
+# LUFFY_REFERENCE (vendored tree with voacapl/src), LUFFY_ITSHFBC (an itshfbc
+# copy, so concurrent runs do not share run/voacapx.dat), LUFFY_WORK (shim build
+# dir, wiped each run), LUFFY_DEST (repo-relative or absolute output dir).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BUILD="$HOME/voacapl-oracle/build"
-DECKS="$REPO_ROOT/golden/p2p/matrix/decks"
+DECKS="${LUFFY_DECKS:-$REPO_ROOT/golden/p2p/matrix/decks}"
+REFERENCE="${LUFFY_REFERENCE:-$REPO_ROOT/reference}"
+ITSHFBC="${LUFFY_ITSHFBC:-$HOME/itshfbc}"
 
 [[ -d "$BUILD" ]] || { echo "oracle build tree missing — run tools/oracle/build_oracle.sh" >&2; exit 1; }
 
@@ -51,12 +58,12 @@ DECK_LIST=("$@")
 # shellcheck disable=SC2206
 [[ ${#DECK_LIST[@]} -eq 0 ]] && DECK_LIST=($DEFAULT_DECKS)
 
-WORK="$HOME/voacapl-oracle/dumps/luffy"
+WORK="${LUFFY_WORK:-$HOME/voacapl-oracle/dumps/luffy}"
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # LUFFYR: the real routine under a name the shim can call.
 sed 's/^      SUBROUTINE LUFFY(IPFLAG)/      SUBROUTINE LUFFYR(IPFLAG)/' \
-    "$REPO_ROOT/reference/voacapl/src/voacapw/luffy.for" > "$WORK/luffyr.f"
+    "$REFERENCE/voacapl/src/voacapw/luffy.for" > "$WORK/luffyr.f"
 grep -q 'SUBROUTINE LUFFYR' "$WORK/luffyr.f" || { echo "rename failed" >&2; exit 1; }
 
 # Reuse the real link line rather than guessing at it: the program is built
@@ -81,18 +88,18 @@ cd "$WORK"
 # capture can redirect it with LUFFY_DEST so it does NOT clear or overwrite the
 # committed 21-deck replay set.  e.g.
 #   LUFFY_DEST=golden/dumps/luffy_icepac wsl bash ... tanbel_m07_s160_icepac
-DEST="${LUFFY_DEST:+$REPO_ROOT/$LUFFY_DEST}"
+case "${LUFFY_DEST:-}" in /*) DEST="$LUFFY_DEST" ;; "") DEST="" ;; *) DEST="$REPO_ROOT/$LUFFY_DEST" ;; esac
 DEST="${DEST:-$REPO_ROOT/golden/dumps/luffy}"
 # Clear the CSVs but not the directory: OneDrive-backed paths refuse rmdir
 # from WSL even where file deletion is allowed.
 mkdir -p "$DEST"; rm -f "$DEST"/*.csv
-RUN="$HOME/itshfbc/run"
+RUN="$ITSHFBC/run"
 n=0
 for name in "${DECK_LIST[@]}"; do
     [[ -f "$DECKS/$name.dat" ]] || { echo "no such deck: $name" >&2; exit 1; }
     rm -f luffy_in.csv luffy_out.csv luffy_ant.csv
     cp "$DECKS/$name.dat" "$RUN/voacapx.dat"
-    ./voacapl_shim "$HOME/itshfbc" voacapx.dat voacapx.out >/dev/null
+    ./voacapl_shim "$ITSHFBC" voacapx.dat voacapx.out >/dev/null
     [[ -s luffy_in.csv ]] || { echo "no capture for $name" >&2; exit 1; }
     cp luffy_in.csv "$DEST/${name}_in.csv"
     cp luffy_out.csv "$DEST/${name}_out.csv"
@@ -119,4 +126,4 @@ done
   echo "  MODE and MDL, which are CHARACTER and feed only the output tables."
   date -u +"generated: %Y-%m-%dT%H:%M:%SZ"
 } > "$DEST/META.txt"
-echo "luffy: $n decks -> golden/dumps/luffy/"
+echo "luffy: $n decks -> $DEST"

@@ -23,9 +23,11 @@ from voacap_gpu.scalar.versy import versy as versy_a
 from voacap_gpu.scalar.virtim import virtim
 from voacap_gpu.batched.versy import versy_batch
 
+from tests.scalar.dumputil import COEFFS_DIR
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "golden" / "dumps" / "versy"
-COEFFS = ROOT / "reference" / "voacapl" / "voacapl" / "itshfbc" / "coeffs"
+COEFFS = COEFFS_DIR    # the package's bundled copy (tests/scalar/dumputil.py)
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 BARS = {1: 512, 2: 512, 3: 512, 4: 128, 5: 8, 6: 8}
 F32 = np.float32

@@ -4,16 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "voacap-gpu"
-version = "0.0.4"
-description = "GPU rewrite of VOACAP HF propagation prediction (PyTorch), validated module-by-module against the Fortran oracle"
+version = "0.1.0"
+description = "GPU rewrite of VOACAP HF propagation prediction (CUDA via CuPy/NVRTC), validated module-by-module against the Fortran oracle"
 readme = "README.md"
 requires-python = ">=3.11"
+# Hard dependencies, deliberately: CuPy (with its bundled CUDA toolkit, the
+# `ctk` extra, so NVRTC is available without a system CUDA install) and NumPy.
+# The production path -- engine.predict, cuda/, scalar/, gridjob.py -- needs
+# nothing else.  CuPy stays a hard dependency for now even though a CPU
+# backend is coming; making it optional too is a later decision.
 dependencies = [
     "cupy-cuda12x[ctk]>=14.1.1",
     "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Stage B, the batched PyTorch port (voacap_gpu.batched, tests/batched/ and
+# the tools/bench_*.py scripts) is the only torch user.  It is several GB, so
+# it is opt-in:  `uv sync --extra batched`  /  `pip install voacap-gpu[batched]`.
+batched = [
     "torch>=2.7",
 ]
 
+# Keep torch OUT of the dev group: `uv sync` must give a working test setup
+# without it (tests/batched/ skips itself when torch is not importable).
 [dependency-groups]
 dev = [
     "pytest>=8",
@@ -21,7 +35,9 @@ dev = [
 ]
 
 # RTX 5080 (Blackwell, sm_120) requires CUDA 12.8+ builds of torch;
-# the default PyPI wheels for Windows are CPU-only.
+# the default PyPI wheels for Windows are CPU-only.  This still applies to
+# the `batched` extra: uv resolves torch from the cu128 index wherever it is
+# requested.
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128" }]
 

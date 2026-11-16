@@ -22,8 +22,10 @@ from voacap_gpu.scalar.lecden import lecden
 from voacap_gpu.batched.area import build_map
 from voacap_gpu.batched.profile import NHT, lecden_batch
 
+from tests.scalar.dumputil import COEFFS_DIR
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-COEFFS = ROOT / "reference" / "voacapl" / "voacapl" / "itshfbc" / "coeffs"
+COEFFS = COEFFS_DIR    # the package's bundled copy (tests/scalar/dumputil.py)
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
 MONTH, SSN, GMT = 4, 120.0, 12.0
 

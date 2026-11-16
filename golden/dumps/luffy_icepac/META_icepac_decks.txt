@@ -1,0 +1,23 @@
+GNU Fortran (GCC) 15.2.1 20260123 (Red Hat 15.2.1-7)
+flags: -cpp -w -fno-backslash -ffixed-line-length-none -fno-sign-zero -I ../modules/ -g -O2 -std=legacy -fallow-argument-mismatch     (taken from the real voacapl link line)
+method: LUFFY shimmed into the real voacapl (dump_luffy.f provides
+        LUFFY, the real one is relinked as LUFFYR).  Everything else
+        -- DECRED, REDMAP, GEOM, SANG, CURMUF, the hour loop -- is
+        the stock program, so the captured state is what a real deck
+        produces rather than what a case generator imagines.
+decks: fbahel_m01_s160_v20_ice fbahel_m07_s15_v30_ice latok_m04_s160_v30_ice latok_m07_s100_v20_ice lonakl_m10_s160_v30_long_ice lonpar_m04_s15_v30_ice punbel_m01_s160_v30_ice sinclb_m10_s160_v30_ice sydstg_m07_s100_v30_ice tanbel_m04_s100_v25_ice toksyd_m10_s15_v30_ice trolyr_m07_s100_v30_ice ushrot_m01_s160_v30_ice
+files: <deck>_in.csv  = LUFFY's entry state, one row per call
+       <deck>_out.csv = /SON/ + XLUF + JMODE at exit, same rows
+       <deck>_ant.csv = /cantenna/ + /pantenna/, one row per antenna
+                        and frequency; captured because OFFAZIM comes
+                        from ANTCALC, not from the antenna file.
+NOT captured: the coefficient maps (loaded
+  Python-side by REDMAP, already validated), and /SON/
+  MODE and MDL, which are CHARACTER and feed only the output tables.
+generated: 2026-11-15T22:36:36Z
+deck source: golden/p2p/icepac_decks/ (tools/oracle/icepac/gen_icepac_decks.py)
+deck config: COEFFS URSI, FPROB 1.00 1.00 1.00 0.70 (Prop-SL ICEPAC mode)
+voacapl: 2026-07-21 build at ~/voacapl-oracle/prefix/bin/voacapl
+sha256(voacapl): fd2950ebfdcb946da47214d3ecfb02ac9e69e319535e2491376fdb4c97c64d03
+captured via: tools/oracle/icepac/run_icepac_dumps.sh (scratch dest, then copied;
+              tanbel_m07_s160_icepac and META.txt are a separate, earlier capture)

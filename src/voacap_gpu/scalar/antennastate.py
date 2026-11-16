@@ -16,6 +16,7 @@ dB, so GAIN divides by 100 on the way out).
 Stored 1-based throughout: ARRAY as (31,92,21), IARRAY360 as (361,92,3).
 """
 
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -28,6 +29,45 @@ NELEV = 91          # elevation samples, 0..90 degrees
 NAZIM = 360         # azimuth samples, 0..359 degrees
 
 AREA_COVERAGE = F32(-999.0)     # OFFAZIM sentinel
+
+# An installed peak above this is almost certainly a table already in absolute
+# dBi with its peak repeated in header parameter 1 (ANTCALC adds the two).
+PEAK_WARN_DBI = 30.0
+
+
+def freq_rows(fqs, fqe):
+    """The ANTENNA card's MINFREQ..MAXFREQ as 1-based ARRAY row bounds.
+
+    ANTCALC's table loops run ``do ifreq = minfreq, maxfreq`` over whole MHz,
+    so both ends must be integral and inside the 1..30 MHz table.
+    """
+    lo, hi = float(fqs), float(fqe)
+    if lo != int(lo) or hi != int(hi):
+        raise ValueError(
+            f"antenna frequency range ({fqs}, {fqe}) must be whole MHz "
+            "(ANTCALC installs one table row per MHz)")
+    lo, hi = int(lo), int(hi)
+    if not 1 <= lo <= hi <= NFREQ:
+        raise ValueError(
+            f"antenna frequency range ({fqs}, {fqe}) must satisfy "
+            f"1 <= MINFREQ <= MAXFREQ <= {NFREQ}")
+    return lo, hi
+
+
+def _warn_peak(ant, absolute):
+    """UserWarning when a relative table + PARM(1) installs > PEAK_WARN_DBI."""
+    if absolute:
+        return
+    peak = ant.peak_gain_dbi(absolute=False)
+    if peak > PEAK_WARN_DBI:
+        warnings.warn(
+            f"antenna {ant.description.strip()!r} (type {ant.jant}) installs a "
+            f"peak gain of {peak:.2f} dBi: table max "
+            f"{ant.peak_gain_dbi(absolute=True):.2f} + header parameter 1 "
+            f"{float(ant.parm[0]):.2f}.  VOACAP tables are RELATIVE to "
+            "parameter 1; if this table is already in absolute dBi, pass "
+            "table_absolute=True so the offset is not added twice.",
+            UserWarning, stacklevel=4)
 
 
 def _a20():
@@ -53,15 +93,43 @@ class CantennaState:
     pwrkw: np.ndarray = field(default_factory=_a20)
     pwrdba: np.ndarray = field(default_factory=_a20)
 
-    def load_p2p(self, iat: int, ant, itr: int, fqs=0.0, fqe=30.0) -> None:
+    def load_p2p(self, iat: int, ant, itr: int, fqs=2.0, fqe=30.0,
+                 absolute=False) -> None:
         """Install a parsed type 14 file as entry `iat`, for TX (1) or RX (2).
 
         Mirrors what READANT + ANTCALC leave in /cantenna/, so a Stage A run can
         be set up without the .VOA card-deck parsing that is out of scope.
+
+        ANTCALC's type-14 arm sets ``antgains(ifreq,..) = table + parm(1)`` for
+        ``ifreq = MINFREQ..MAXFREQ`` only (the ANTENNA card's range, normally
+        2..30); rows outside stay at their zero preset, and XFQS/XFQE bracket
+        the same range so GAIN never selects this entry outside it.  ``fqs`` /
+        ``fqe`` are that MINFREQ/MAXFREQ, whole MHz.  (Before this mirrored
+        the Fortran, all 30 rows were installed with XFQS 0.)
+
+        The table is RELATIVE to header parameter 1 (PARM(1), "Max Gain dBi"),
+        which is added to every gain; ``absolute=True`` skips that add for a
+        table already in absolute dBi.  A UserWarning flags an installed peak
+        above ``PEAK_WARN_DBI`` when the add is applied.
         """
-        arr, aeff = ant.p2p_tables()
-        self.array[1:NFREQ + 1, 1:NELEV + 1, iat] = arr
-        self.aeff[1:NFREQ + 1, iat] = aeff
+        ifs, ife = freq_rows(fqs, fqe)
+        arr, aeff = ant.p2p_tables(absolute=absolute)
+        _warn_peak(ant, absolute)
+        # The gainNN.dat round trip, exactly as load_p2p_t13 models it:
+        # ANTCALC clamps at -99.99 and writes f7.3 / f6.2 (antcalc.for:342-347),
+        # DECRED reads them back (decred.for:335-336).  A table + PARM(1) sum
+        # leaves the 3-decimal grid whenever PARM(1) != 0 (sample.14x: 511 of
+        # 2730 cells moved 1-2 ULP without this); for PARM(1) == 0 it is the
+        # identity.  Validated against ANTCALC's captured /cantenna/ in
+        # tests/test_antenna_oracle.py.
+        arr = np.maximum(arr, F32(-99.99))
+        arr = (np.round(np.float64(arr) * 1000.0) / 1000.0).astype(np.float32)
+        aeff = (np.round(np.float64(aeff) * 100.0) / 100.0).astype(np.float32)
+        self.array[1:NFREQ + 1, 1:NELEV + 1, iat] = F32(0.0)
+        self.aeff[1:NFREQ + 1, iat] = F32(0.0)
+        # table row k (0-based) is frequency k+1 MHz == ARRAY row k+1
+        self.array[ifs:ife + 1, 1:NELEV + 1, iat] = arr[ifs - 1:ife]
+        self.aeff[ifs:ife + 1, iat] = aeff[ifs - 1:ife]
         self.iats[iat] = itr
         self.xfqs[iat] = F32(fqs)
         self.xfqe[iat] = F32(fqe)
@@ -69,7 +137,7 @@ class CantennaState:
         self.numants = max(self.numants, iat)
 
     def load_p2p_t13(self, iat: int, ant, itr: int, offazim_deg,
-                     fqs=2.0, fqe=30.0) -> None:
+                     fqs=2.0, fqe=30.0, absolute=False) -> None:
         """Install a parsed type 13 (azimuth-dependent) file for one OFFAZIM.
 
         ANTCALC's point-to-point type-13 arm (antcalc.for:268-284): linearly
@@ -90,9 +158,17 @@ class CantennaState:
         -- so gains are quantized to 3 decimals and the efficiency to 2.
         Type 14 skips this modelling because its values never leave the
         3-decimal grid; the azimuth interpolation here does.
+
+        As for type 14, the table is RELATIVE to header parameter 1:
+        ``absolute=True`` skips the PARM(1) add for a table already in
+        absolute dBi, and a UserWarning flags an installed peak (over the
+        whole 360x91 table, so independent of OFFAZIM) above
+        ``PEAK_WARN_DBI`` when the add is applied.
         """
         if ant.jant != 13:
             raise ValueError(f"load_p2p_t13 needs a type 13 file, got {ant.jant}")
+        ifs, ife = freq_rows(fqs, fqe)
+        _warn_peak(ant, absolute)
         off = F32(offazim_deg)
         # OFFAZIM can land on exactly 360.0 in REAL*4 (a path azimuth of
         # 360-eps minus a 0 beam rounds up); the direction is circularly
@@ -108,14 +184,18 @@ class CantennaState:
         g2 = ant.gains360[iazim2]
         fract = F32(off - F32(float(iazim)))
         # antcalc.for:282 evaluation order: (g1 + (g2-g1)*fract) + parm(1)
-        g = (g1 + (g2 - g1) * fract) + ant.parm[0]
+        if absolute:
+            g = g1 + (g2 - g1) * fract
+        else:
+            g = (g1 + (g2 - g1) * fract) + ant.parm[0]
         g = np.maximum(g, F32(-99.99))        # antcalc.for:343 floor
         # gainNN.dat f7.3 / f6.2 round trip (round-half-even, as gfortran
         # formats), landing back in float32 like DECRED's formatted READ.
         g = np.float64(g)
         g = (np.round(g * 1000.0) / 1000.0).astype(np.float32)
         eff = F32(np.round(np.float64(ant.parm[2]) * 100.0) / 100.0)
-        ifs, ife = int(fqs), int(fqe)
+        self.array[1:NFREQ + 1, 1:NELEV + 1, iat] = F32(0.0)
+        self.aeff[1:NFREQ + 1, iat] = F32(0.0)
         self.array[ifs:ife + 1, 1:NELEV + 1, iat] = g[np.newaxis, :]
         self.aeff[ifs:ife + 1, iat] = eff
         self.iats[iat] = itr

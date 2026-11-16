@@ -80,6 +80,24 @@
 #define VC_SETUP_NAB   319
 #define VC_SETUP_NHOUR 25
 
+// THE HOUR GUARD.  A legal hour is 1..24.  Anything else has no VIRTIM row
+// (`ab` holds rows 0..24 per ionosphere, so hour 60 reads another table or
+// past the end) and overruns TimeState's 25-long UTIME/XLMT, so the build is
+// REFUSED rather than run on garbage.  The refusal travels as IPFLAG
+// VC_IPFLAG_REFUSED -- no legal IPFLAG is negative -- and luffy_batch turns
+// it into status VC_STATUS_TABLE_OOB (3), the code GAIN's out-of-bounds table
+// read already uses: Stage A raises IndexError for hour 25 for the same
+// reason.  driver.py range-checks on the host first; this is the defence in
+// depth for a caller that bypasses it.
+#ifndef VC_IPFLAG_REFUSED
+#define VC_IPFLAG_REFUSED   (-1)
+#endif
+#ifndef VC_STATUS_TABLE_OOB
+#define VC_STATUS_TABLE_OOB 3
+#endif
+#define VC_SETUP_HOUR_MIN 1
+#define VC_SETUP_HOUR_MAX (VC_SETUP_NHOUR - 1)
+
 // Per-ionosphere strides for the tables only the setup chain needs (the ones
 // LUFFY also uses are in circuit.cuh).
 #define VC_IKIM_STRIDE (10 * 6)
@@ -323,6 +341,15 @@ __device__ inline int setup_circuit(CircuitState* cs, const RaysView& rays,
                                     const SetupTables& t,
                                     float* muf_out) {
     LayerState* lay = &cs->layers;
+
+    // --- the hour guard (see VC_IPFLAG_REFUSED) ----------------------------
+    // /SON/ is reset so the refused row reads as a fresh, empty answer rather
+    // than the previous occupant's; LUFFY never runs on it.
+    if (p.hour < VC_SETUP_HOUR_MIN || p.hour > VC_SETUP_HOUR_MAX) {
+        setup_reset_son(&cs->son);
+        muf_out[0] = muf_out[1] = muf_out[2] = __int_as_float(0x7fc00000);
+        return VC_IPFLAG_REFUSED;
+    }
 
     // --- GEOM, then the geometry install ----------------------------------
     GeomResult g;

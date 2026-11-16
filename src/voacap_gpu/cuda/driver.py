@@ -410,6 +410,142 @@ SETUP_CONFIG_DTYPE = np.dtype([
 
 SETUP_BYTES_PER_THREAD = SETUP_PARAMS_DTYPE.itemsize
 
+# setup.cuh's device-side hour guard: a row whose hour is outside 1..24 is
+# not built (IPFLAG comes back SETUP_IPFLAG_REFUSED) and LUFFY reports it as
+# SETUP_STATUS_BAD_HOUR -- 3, the out-of-bounds-table-read code GAIN already
+# uses, since Stage A raises IndexError on such an hour.  The host check in
+# `_check_setup_params` refuses these rows before launch; the guard is the
+# defence in depth for a caller that bypasses it.
+SETUP_IPFLAG_REFUSED = -1
+SETUP_STATUS_BAD_HOUR = 3
+
+
+def _require_dtype(arr, dtype, what):
+    if arr.dtype != dtype:
+        raise TypeError(f"{what} must have dtype {dtype}, got {arr.dtype}")
+
+
+def _require_rows(arr, n, what):
+    if arr.ndim != 1 or arr.shape[0] != n:
+        raise ValueError(f"{what} must have shape ({n},), got {arr.shape}")
+
+
+def _offending(mask, limit=8):
+    """'rows [3, 17]' (capped) for a boolean mask with at least one hit."""
+    rows = np.flatnonzero(mask)
+    head = ", ".join(str(int(r)) for r in rows[:limit])
+    more = f", ... ({rows.size} rows)" if rows.size > limit else ""
+    return f"rows [{head}{more}]"
+
+
+def _n_antenna_sets(ant):
+    """How many /cantenna/ sets a ``shared_antenna_tables`` dict holds."""
+    return int(np.size(ant["iats"])) // (int(ant["numants"]) + 1)
+
+
+def _check_setup_params(params, ant_idx, n_iono, n_cfg, n_ant):
+    """Refuse a SETUP_PARAMS_DTYPE batch the device would mis-read.
+
+    Every index here becomes a raw pointer offset on the device, and an
+    out-of-range hour reads past the 25-row VIRTIM table and comes back as
+    status 0 with garbage, so these are checked BEFORE launch, with a
+    ValueError naming the field and the offending rows.  Vectorised: a few
+    comparisons per field, noise next to the ~400k rows/s the path runs at.
+    Coordinates use ``~(abs(x) <= lim)``, which is also True for NaN, so
+    "finite and in range" is one comparison.
+    """
+    def refuse(field, mask, rule):
+        if mask.any():
+            raise ValueError(
+                f"SetupParams.{field} out of range ({rule}) at "
+                f"{_offending(mask)}")
+
+    hour = params["hour"]
+    refuse("hour", (hour < 1) | (hour > 24), "integer hour 1..24")
+    for f in ("tlatd", "rlatd"):
+        refuse(f, ~(np.abs(params[f]) <= 90.0), "finite, -90..90 degrees")
+    # Longitude is circular: refuse only non-finite values, and WRAP an
+    # out-of-range one into [-180, 180] (validate.wrap_lon, the PropServer
+    # normaliseLon rule) on a COPY, so the caller's array is never mutated
+    # and an all-in-range batch is passed through untouched (bit-identical).
+    wrapped = None
+    for f in ("tlongd", "rlongd"):
+        refuse(f, ~np.isfinite(params[f]), "finite degrees")
+        out = ~(np.abs(params[f]) <= 180.0)
+        if out.any():
+            from voacap_gpu.validate import wrap_lon
+            if wrapped is None:
+                wrapped = params.copy()
+            col = wrapped[f]
+            col[out] = wrap_lon(col[out].astype(np.float64)).astype(col.dtype)
+    if wrapped is not None:
+        params = wrapped
+    npsl = params["npsl"]
+    refuse("npsl", (npsl != 0) & (npsl != 1), "0 or 1")
+    iono = params["iono"]
+    refuse("iono", (iono < 0) | (iono >= n_iono),
+           f"0 <= iono < {n_iono} ionosphere slots")
+    cfg = params["cfg"]
+    refuse("cfg", (cfg < 0) | (cfg >= n_cfg),
+           f"0 <= cfg < {n_cfg} config slots supplied")
+    bad = (ant_idx < 0) | (ant_idx >= n_ant)
+    if bad.any():
+        raise ValueError(
+            f"ant_idx out of range (0 <= ant_idx < {n_ant} antenna sets) at "
+            f"{_offending(bad)}")
+    return params
+
+
+def _check_luffy_inputs(bufs, rays_bufs, ipflags, iono_idx, ant_idx, n=None):
+    """dtype/shape checks for a packed LUFFY batch; returns its length."""
+    _require_dtype(bufs, CIRCUIT_DTYPE, "bufs")
+    _require_dtype(rays_bufs, RAYS_DTYPE, "rays_bufs")
+    if n is None:
+        n = bufs.shape[0] if bufs.ndim == 1 else -1
+    _require_rows(bufs, n, "bufs")
+    _require_rows(rays_bufs, n, "rays_bufs")
+    for v, what in ((ipflags, "ipflags"), (iono_idx, "iono_idx"),
+                    (ant_idx, "ant_idx")):
+        _require_rows(np.asarray(v), n, what)
+    return n
+
+
+def _drain_default_stream():
+    """Block until the device has finished everything queued so far.
+
+    THE ORDERING CONTRACT every rig below keeps.  Each one allocates and
+    fills its buffers (``cp.zeros`` / ``cp.full``) and uploads its tables
+    (``cp.asarray``) on whatever stream is current -- CuPy's legacy default
+    stream, normally -- and the pipelined rigs then do all their work on
+    ``Stream(non_blocking=True)`` streams, which by definition do NOT wait for
+    the default stream.  When the pool hands back memory freed by an earlier
+    object, a work stream could read it before the fill or upload landed:
+    reproduced as wrong rows with status 0, and pinned deterministically by
+    ``tests/cuda/test_rig_race.py``.
+
+    A device synchronise is the simplest ordering that is correct whatever
+    stream the caller had current at construction and whatever stream a
+    later submission uses (an event recorded on "the" default stream would
+    have to guess which one the fills went to).  It runs only at the edges --
+    end of construction, a table swap, the once-per-run config upload --
+    never inside a chunk loop, so it costs the pipelines no overlap.
+    """
+    import cupy as cp
+    cp.cuda.Device().synchronize()
+
+
+def _quiesce(events, inflight):
+    """Wait out every chunk still in flight -- the exception path of a run.
+
+    A pipelined run normally waits on each slot's event before it returns.
+    If it raises part-way (a bad ``on_chunk``, a KeyboardInterrupt), chunks
+    may still be running on the work streams; letting the rig be freed under
+    them would hand their buffers back to the pool while a kernel still
+    writes into them -- the mirror image of the construction race.
+    """
+    for slot in inflight:
+        events[slot].synchronize()
+
 # The setup chain's own per-ionosphere tables.  The five REDMAP overlays it
 # shares with LUFFY (fakp/fakmap/hmym/fakabp/abmap) come from
 # ``shared_iono_tables`` and are NOT duplicated here.
@@ -595,6 +731,17 @@ _KERNEL_SRC = r'''
 #include "luffy.cuh"
 #include "luffy_warp.cuh"
 
+// setup.cuh's hour guard hands LUFFY this IPFLAG for a circuit it refused to
+// build; no legal IPFLAG is negative.  Such a row is answered with status
+// VC_STATUS_TABLE_OOB and LUFFY never runs on its (unbuilt) state.  The
+// values must match setup.cuh's; both are guarded so either may come first.
+#ifndef VC_IPFLAG_REFUSED
+#define VC_IPFLAG_REFUSED   (-1)
+#endif
+#ifndef VC_STATUS_TABLE_OOB
+#define VC_STATUS_TABLE_OOB 3
+#endif
+
 extern "C" __global__ void luffy_batch(
         CircuitState* circ,
         int* rays_nang, float* rays_ang, int* rays_ifob,
@@ -610,6 +757,10 @@ extern "C" __global__ void luffy_batch(
         int* status, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
+    if (ipflag[i] == VC_IPFLAG_REFUSED) {
+        status[i] = VC_STATUS_TABLE_OOB;
+        return;
+    }
     status[i] = luffy(&circ[i], rays_nang, rays_ang, rays_ifob, n, i,
                       fam, dud, fakp, fakmap, hmym, fakabp, abmap,
                       sys, perr, f2d111, ant_array, ant_aeff, ant_iats,
@@ -647,6 +798,14 @@ extern "C" __global__ void luffy_batch_warp(
     int slot = wib * VC_WARP_GROUPS + grp;
     int i = blockIdx.x * ((blockDim.x >> 5) * VC_WARP_GROUPS) + slot;
     if (i >= n) return;
+    // uniform across the group (one circuit-hour), and every collective in
+    // luffy_warp.cuh is group-masked, so a whole group may leave here exactly
+    // as a tail group leaves at `i >= n`
+    if (ipflag[i] == VC_IPFLAG_REFUSED) {
+        if ((lane & (VC_WARP_GLANES - 1)) == 0)
+            status[i] = VC_STATUS_TABLE_OOB;
+        return;
+    }
     LaneState L;
     int st = luffy_warp(&circ[i], rays_nang, rays_ang, rays_ifob, n, i,
                         &L, &warp_store[slot], lane,
@@ -905,13 +1064,11 @@ def stage_luffy(bufs, rays_bufs, ipflags, iono, iono_idx, ant, ant_idx,
     """
     import cupy as cp
 
-    assert upload in ("full", "inputs"), upload
+    if upload not in ("full", "inputs"):
+        raise ValueError(f"upload must be 'full' or 'inputs', got {upload!r}")
     bufs = np.ascontiguousarray(bufs)
     rays_bufs = np.ascontiguousarray(rays_bufs)
-    assert bufs.dtype == CIRCUIT_DTYPE, bufs.dtype
-    assert rays_bufs.dtype == RAYS_DTYPE, rays_bufs.dtype
-    n = bufs.shape[0]
-    assert rays_bufs.shape[0] == n, (rays_bufs.shape, n)
+    n = _check_luffy_inputs(bufs, rays_bufs, ipflags, iono_idx, ant_idx)
     if upload == "full":
         d_circ = cp.asarray(bufs.view(np.uint8))
         d_soa = _rays_to_soa(rays_bufs, n)
@@ -1135,6 +1292,9 @@ class LuffyArena:
             self._grid = ((self.n + block - 1) // block,)
             self._block = (block,)
             self._shared = 0
+        # the fills and table copies above went to the current stream; a
+        # caller may submit from another one (see _drain_default_stream)
+        _drain_default_stream()
 
     @property
     def state(self):
@@ -1145,8 +1305,8 @@ class LuffyArena:
         """One batch's INPUTS into the resident buffers.  No launch."""
         bufs = np.ascontiguousarray(bufs)
         rays_bufs = np.ascontiguousarray(rays_bufs)
-        assert bufs.dtype == CIRCUIT_DTYPE and bufs.shape[0] == self.n
-        assert rays_bufs.dtype == RAYS_DTYPE and rays_bufs.shape[0] == self.n
+        _check_luffy_inputs(bufs, rays_bufs, ipflags, iono_idx, ant_idx,
+                            n=self.n)
         _write_circuit_inputs(self._d_circ, bufs, self.n)
         _write_rays_inputs(self._d_soa, rays_bufs, self.n)
         self._d_ipflag.set(np.ascontiguousarray(ipflags, I32))
@@ -1292,6 +1452,11 @@ class PipelinedLuffy:
             d_ang = ds[o["ang"]:o["ang"] + ln["ang"]].view(np.float32)
             d_ifob = ds[o["ifob"]:o["ifob"] + ln["ifob"]]
             self._rays_views.append((d_nang, d_ang, d_ifob))
+        # Every fill and table copy above went to the CURRENT stream, and the
+        # work streams are non-blocking: without this, a first chunk on
+        # recycled pool memory can run before the zero-fill lands.  See
+        # _drain_default_stream.
+        _drain_default_stream()
 
     def _host(self, shape, dtype):
         """A staging array — page-locked when pinned, plain numpy otherwise.
@@ -1396,10 +1561,7 @@ class PipelinedLuffy:
         """
         bufs = np.ascontiguousarray(bufs)
         rays_bufs = np.ascontiguousarray(rays_bufs)
-        assert bufs.dtype == CIRCUIT_DTYPE, bufs.dtype
-        assert rays_bufs.dtype == RAYS_DTYPE, rays_bufs.dtype
-        n = bufs.shape[0]
-        assert rays_bufs.shape[0] == n
+        n = _check_luffy_inputs(bufs, rays_bufs, ipflags, iono_idx, ant_idx)
         words = bufs.view(np.int32).reshape(n, _CIRC_WORDS)
         words_rays = rays_bufs.view(np.int32).reshape(n, _RAYS_WORDS)
         ipf = np.ascontiguousarray(ipflags, I32)
@@ -1416,24 +1578,29 @@ class PipelinedLuffy:
                   for a in range(0, n, self.chunk)]
         inflight = {}                       # slot -> (a, b) awaiting unpack
         prep_future = {}                    # slot -> Future, if a pool is used
-        for k, (a, b) in enumerate(bounds):
-            slot = k % self.ns
-            if slot in inflight:            # reuse: wait, then drain that slot
-                pa, pb = inflight.pop(slot)
+        try:
+            for k, (a, b) in enumerate(bounds):
+                slot = k % self.ns
+                if slot in inflight:        # reuse: wait, then drain that slot
+                    pa, pb = inflight.pop(slot)
+                    self.events[slot].synchronize()
+                    self._unpack(slot, pa, pb, out)
+                if self._pool is not None:
+                    fut = prep_future.pop(slot, None)
+                    if fut is not None:
+                        fut.result()
+                    self._prep(slot, words, words_rays, ipf, ii, ai, a, b)
+                else:
+                    self._prep(slot, words, words_rays, ipf, ii, ai, a, b)
+                self._enqueue(slot)
+                inflight[slot] = (a, b)
+            for slot in list(inflight):
+                a, b = inflight[slot]
                 self.events[slot].synchronize()
-                self._unpack(slot, pa, pb, out)
-            if self._pool is not None:
-                fut = prep_future.pop(slot, None)
-                if fut is not None:
-                    fut.result()
-                self._prep(slot, words, words_rays, ipf, ii, ai, a, b)
-            else:
-                self._prep(slot, words, words_rays, ipf, ii, ai, a, b)
-            self._enqueue(slot)
-            inflight[slot] = (a, b)
-        for slot, (a, b) in inflight.items():
-            self.events[slot].synchronize()
-            self._unpack(slot, a, b, out)
+                self._unpack(slot, a, b, out)
+                del inflight[slot]
+        finally:
+            _quiesce(self.events, inflight)
         return LuffyResults(son, xluf, jmode, status)
 
     def close(self):
@@ -1468,7 +1635,9 @@ def run_luffy(circuits, ipflags, block=32, write_back=True):
     state is written back into the given Circuit objects in place.
     """
     ipflags = np.asarray(ipflags, I32)
-    assert len(ipflags) == len(circuits)
+    if len(ipflags) != len(circuits):
+        raise ValueError(f"{len(ipflags)} ipflags for {len(circuits)} "
+                         "circuits")
 
     ionos, iono_idx, seen_i = [], [], {}
     cants, ant_idx, seen_a = [], [], {}
@@ -1639,9 +1808,12 @@ class SetupLuffy:
                             d["fam"], d["dud"], d["fakp"], d["fakmap"],
                             d["hmym"], d["fakabp"], d["abmap"], d["sys"],
                             d["perr"], d["f2d111"])
+        # an iono index has to be valid for BOTH table sets it addresses
+        self._n_iono = min(len(slots), int(np.size(iono["f2d111"])))
+        self._n_ant = 0
         self._luffy_args = None
         if ant is not None:
-            self.set_antennas(ant)
+            self._install_antennas(ant)
         if warp:
             wpb = int(warps_per_block)
             self._luffy_fn = load_kernel(fast_math=fast_math).get_function(
@@ -1655,6 +1827,10 @@ class SetupLuffy:
             self._luffy_grid = ((self.n + self.block - 1) // self.block,)
             self._luffy_block = (self.block,)
             self._luffy_shared = 0
+        # Submissions run on the current stream, as the fills above did, so
+        # a caller who stays on one stream is ordered anyway; this makes the
+        # rig safe to drive from ANY stream (see _drain_default_stream).
+        _drain_default_stream()
 
     @property
     def state(self):
@@ -1671,30 +1847,54 @@ class SetupLuffy:
         extent gain.cuh indexes with, so it is baked into the argument tuple
         and the tuple is rebuilt here rather than patched.
         """
+        self._install_antennas(ant)
+        _drain_default_stream()
+        return self
+
+    def _install_antennas(self, ant):
+        """`set_antennas` without the drain: for ``upload(ant=...)``, whose
+        copies go to the same stream as the launch that follows them."""
         cp = self._cp
         a = {k: cp.asarray(v) for k, v in ant.items() if k != "numants"}
         self._ant = a                            # keep the copies alive
+        self._n_ant = _n_antenna_sets(ant)
         self._luffy_args = self._luffy_head + (
             a["array"], a["aeff"], a["iats"], a["xfqs"], a["xfqe"],
             a["offazim"], a["pwrdba"], np.int32(ant["numants"]),
             self._d_status, np.int32(self.n))
-        return self
+
+    def _validate(self, params, cfgs, ant_idx):
+        """Input checks shared by `upload` and `run` (which pads after).
+
+        Returns the params to use: the same array, or a copy with
+        out-of-range longitudes wrapped (see ``_check_setup_params``)."""
+        _require_dtype(params, SETUP_PARAMS_DTYPE, "params")
+        _require_dtype(cfgs, SETUP_CONFIG_DTYPE, "cfgs")
+        if params.ndim != 1:
+            raise ValueError(f"params must be 1-D, got shape {params.shape}")
+        _require_rows(ant_idx, params.shape[0], "ant_idx")
+        if self._luffy_args is None:
+            raise ValueError(
+                "no antenna tables: pass ant= to the constructor, to "
+                "upload/run, or call set_antennas")
+        return _check_setup_params(params, ant_idx, self._n_iono,
+                                   cfgs.shape[0], self._n_ant)
 
     def upload(self, params, cfgs, ant_idx, ant=None):
         """One batch's raw parameters into the resident buffers.  No launch."""
-        cp = self._cp
         if ant is not None:
-            self.set_antennas(ant)
-        assert self._luffy_args is not None, (
-            "no antenna tables: pass ant= to the constructor, to upload/run, "
-            "or call set_antennas")
+            self._install_antennas(ant)
         params = np.ascontiguousarray(params)
         cfgs = np.ascontiguousarray(cfgs)
-        assert params.dtype == SETUP_PARAMS_DTYPE, params.dtype
-        assert cfgs.dtype == SETUP_CONFIG_DTYPE, cfgs.dtype
-        assert params.shape[0] == self.n, (params.shape, self.n)
-        assert int(params["cfg"].max(initial=0)) < cfgs.shape[0], (
-            "a SetupParams references a config slot that was not supplied")
+        ant_idx = np.ascontiguousarray(ant_idx, I32)
+        params = self._validate(params, cfgs, ant_idx)
+        if params.shape[0] != self.n:
+            raise ValueError(f"upload takes exactly n={self.n} rows, got "
+                             f"{params.shape[0]} (run() pads a short batch)")
+        return self._upload(params, cfgs, ant_idx)
+
+    def _upload(self, params, cfgs, ant_idx):
+        cp = self._cp
         self._d_prm.set(params.view(np.uint8).ravel())
         self._d_cfg = cp.asarray(cfgs.view(np.uint8).ravel())
         self._d_ii.set(np.ascontiguousarray(params["iono"], I32))
@@ -1734,16 +1934,20 @@ class SetupLuffy:
         zeros; see the class docstring) and the padding is dropped on the way
         out, so a caller never sees the fixed width.
         """
+        if ant is not None:
+            self._install_antennas(ant)
         params = np.ascontiguousarray(params)
+        cfgs = np.ascontiguousarray(cfgs)
         ant_idx = np.ascontiguousarray(ant_idx, I32)
+        params = self._validate(params, cfgs, ant_idx)
         c = params.shape[0]
-        assert c <= self.n, (c, self.n)
-        assert ant_idx.shape[0] == c, (ant_idx.shape, c)
+        if not 0 < c <= self.n:
+            raise ValueError(f"run takes 1..n={self.n} rows, got {c}")
         if c < self.n:
             pad = self.n - c
             params = np.concatenate([params, np.repeat(params[:1], pad)])
             ant_idx = np.concatenate([ant_idx, np.repeat(ant_idx[:1], pad)])
-        self.upload(params, cfgs, ant_idx, ant=ant).launch()
+        self._upload(params, cfgs, ant_idx).launch()
         res, muf3 = self.results()
         if c == self.n:
             return res, muf3
@@ -1836,8 +2040,10 @@ class PipelinedSetupLuffy:
         self._iono_key = None
         self._ant = None
         self._ant_args = None
+        self._n_iono = 0
+        self._n_ant = 0
         if slots is not None and iono is not None:
-            self.set_ionosphere(slots, iono)
+            self._install_ionosphere(slots, iono)
 
         # per-slot device + pinned staging, zeroed once
         self.streams, self.events = [], []
@@ -1875,6 +2081,11 @@ class PipelinedSetupLuffy:
             self.p_status.append(self._host(self.chunk, np.int32))
             self.p_muf3.append(self._host((self.chunk, 3), np.float32))
             self._rays.append(_rays_views(soa))
+        # Every fill and table copy above went to the CURRENT stream, and the
+        # slot streams are non-blocking: without this, a first chunk on
+        # recycled pool memory can run before the zero-fill lands (reproduced
+        # as wrong rows with status 0).  See _drain_default_stream.
+        _drain_default_stream()
 
     def _host(self, shape, dtype):
         """Page-locked staging, so the copies can actually overlap compute."""
@@ -1891,9 +2102,14 @@ class PipelinedSetupLuffy:
         names the same (coefficients, month, SSN); pass anything hashable that
         identifies the table set, or None to always upload.
         """
-        cp = self._cp
         if key is not None and key == self._iono_key:
             return self
+        self._install_ionosphere(slots, iono, key)
+        _drain_default_stream()       # the copies are read on slot streams
+        return self
+
+    def _install_ionosphere(self, slots, iono, key=None):
+        cp = self._cp
         st = setup_iono_tables(slots)
         d = {k: cp.asarray(v) for k, v in iono.items()}
         s = {k: cp.asarray(v) for k, v in st.items()}
@@ -1903,17 +2119,23 @@ class PipelinedSetupLuffy:
                               s["achi"], s["bchi"], d["fakp"], d["fakmap"],
                               d["hmym"], d["fakabp"], d["abmap"], s["f2d"],
                               s["month"], s["ssn"])
+        # an iono index has to be valid for BOTH table sets it addresses
+        self._n_iono = min(len(slots), int(np.size(iono["f2d111"])))
         self._iono_key = key
-        return self
 
     def set_antennas(self, ant):
+        self._install_antennas(ant)
+        _drain_default_stream()       # the copies are read on slot streams
+        return self
+
+    def _install_antennas(self, ant):
         cp = self._cp
         a = {k: cp.asarray(v) for k, v in ant.items() if k != "numants"}
         self._ant = a
+        self._n_ant = _n_antenna_sets(ant)
         self._ant_args = (a["array"], a["aeff"], a["iats"], a["xfqs"],
                           a["xfqe"], a["offazim"], a["pwrdba"],
                           np.int32(ant["numants"]))
-        return self
 
     def _h2d(self, dst, src, stream):
         self._rt.memcpyAsync(dst.data.ptr, src.ctypes.data, src.nbytes,
@@ -2004,48 +2226,60 @@ class PipelinedSetupLuffy:
         """
         cp = self._cp
         params = np.ascontiguousarray(params)
-        assert params.dtype == SETUP_PARAMS_DTYPE, params.dtype
+        _require_dtype(params, SETUP_PARAMS_DTYPE, "params")
         cfgs = np.ascontiguousarray(cfgs)
-        assert cfgs.dtype == SETUP_CONFIG_DTYPE, cfgs.dtype
+        _require_dtype(cfgs, SETUP_CONFIG_DTYPE, "cfgs")
         ant_idx = np.ascontiguousarray(ant_idx, I32)
+        if params.ndim != 1:
+            raise ValueError(f"params must be 1-D, got shape {params.shape}")
         n = params.shape[0]
-        assert ant_idx.shape[0] == n, (ant_idx.shape, n)
-        assert int(params["cfg"].max(initial=0)) < cfgs.shape[0], (
-            "a SetupParams references a config slot that was not supplied")
-        assert self._setup_shared is not None, (
-            "no ionosphere: pass slots/iono to the constructor or call "
-            "set_ionosphere")
-        self.set_antennas(ant)
+        _require_rows(ant_idx, n, "ant_idx")
+        if self._setup_shared is None:
+            raise ValueError("no ionosphere: pass slots/iono to the "
+                             "constructor or call set_ionosphere")
+        # checked against the antenna set being INSTALLED, before anything
+        # about the rig changes
+        params = _check_setup_params(params, ant_idx, self._n_iono,
+                                     cfgs.shape[0], _n_antenna_sets(ant))
+        self._install_antennas(ant)
         d_cfg = cp.asarray(cfgs.view(np.uint8).ravel())
         for k in range(self.ns):
             self.d_cfg[k] = d_cfg          # tiny and read-only: shared
+        # both uploads above went to the current stream; the slot streams
+        # read them (see _drain_default_stream).  Once per run, before the
+        # first chunk, so nothing in flight is serialised by it.
+        _drain_default_stream()
         iono_idx = np.ascontiguousarray(params["iono"], I32)
 
         bounds = [(a, min(a + self.chunk, n))
                   for a in range(0, n, self.chunk)]
         keep = [] if on_chunk is None else None
         inflight = {}                       # slot -> (a, b) awaiting harvest
-        for k, (a, b) in enumerate(bounds):
-            slot = k % self.ns
-            if slot in inflight:            # reuse: drain that slot first
-                pa, pb = inflight.pop(slot)
+        try:
+            for k, (a, b) in enumerate(bounds):
+                slot = k % self.ns
+                if slot in inflight:        # reuse: drain that slot first
+                    pa, pb = inflight.pop(slot)
+                    self.events[slot].synchronize()
+                    out = self._harvest(slot, pa, pb)
+                    if on_chunk is None:
+                        keep.append((pa, pb) + out)
+                    else:
+                        on_chunk(pa, pb, out[0], out[1])
+                self._stage(slot, params, iono_idx, ant_idx, a, b)
+                self._enqueue(slot, b - a)
+                inflight[slot] = (a, b)
+            for slot in sorted(inflight, key=lambda s: inflight[s][0]):
+                a, b = inflight[slot]
                 self.events[slot].synchronize()
-                out = self._harvest(slot, pa, pb)
+                out = self._harvest(slot, a, b)
+                del inflight[slot]
                 if on_chunk is None:
-                    keep.append((pa, pb) + out)
+                    keep.append((a, b) + out)
                 else:
-                    on_chunk(pa, pb, out[0], out[1])
-            self._stage(slot, params, iono_idx, ant_idx, a, b)
-            self._enqueue(slot, b - a)
-            inflight[slot] = (a, b)
-        for slot in sorted(inflight, key=lambda s: inflight[s][0]):
-            a, b = inflight[slot]
-            self.events[slot].synchronize()
-            out = self._harvest(slot, a, b)
-            if on_chunk is None:
-                keep.append((a, b) + out)
-            else:
-                on_chunk(a, b, out[0], out[1])
+                    on_chunk(a, b, out[0], out[1])
+        finally:
+            _quiesce(self.events, inflight)
         if on_chunk is not None:
             return None
 

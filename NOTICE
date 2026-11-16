@@ -1,0 +1,58 @@
+cudacap (Python package voacap_gpu)
+===================================
+
+cudacap's own code is released under the MIT License. See LICENSE.
+
+This file lists the third-party origins of the work and of the data in this
+repository.
+
+
+VOACAP / ICEPAC (NTIA/ITS)
+--------------------------
+
+cudacap is a port of VOACAP and ICEPAC, HF propagation prediction programs
+developed by NTIA/ITS, an agency of the US Government. The VOACAP
+distribution carries this disclaimer:
+
+    The software contained within was developed by an agency of the
+    U.S. Government. NTIA/ITS has no objection to the use of this
+    software for any purpose since it is not subject to copyright
+    protection in the U.S.
+
+    No warranty, expressed or implied, is made by NTIA/ITS or the
+    U.S. Government as to the accuracy, suitability and functioning
+    of the program and related material, nor shall the fact of
+    distribution constitute any endorsement by the U.S. Government.
+
+Neither NTIA/ITS nor the US Government endorses or supports cudacap.
+
+
+voacapl (J. A. Watson)
+----------------------
+
+The port was validated against voacapl, J. A. Watson's gfortran port of
+VOACAP:
+
+    https://github.com/jawatson/voacapl
+
+J. A. Watson's modifications to the original VOACAP source are released
+under the Creative Commons CC0 licence. The oracle outputs in golden/ were
+produced by running voacapl (see the META.txt files there for the build and
+inputs).
+
+voacapl also contains GPL-licensed utilities (dst2csv, dst2ascii). None of
+those files are included in the current tree.
+
+
+CCIR/URSI coefficient data
+--------------------------
+
+The ionospheric coefficient files in src/voacap_gpu/data/coeffs/
+(coeff01.asc to coeff12.asc, fof2CCIR.asc and fof2URSI.asc) come from the
+VOACAP/ITSHFBC distribution, as shipped in voacapl's itshfbc/coeffs/
+directory. The binary files in golden/coeffs/ were generated from voacapl's
+ASCII coefficient sources with its coeffbin and fof2bin converters.
+
+Older commits of this repository (before 477dad7) also contain a vendored
+copy of voacapl and ITSHFBC under reference/, with voacapl's own COPYING and
+LICENSE files. That tree is not part of the current tree.

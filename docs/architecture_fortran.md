@@ -6,6 +6,9 @@ driver `hfmufs.for` and the system-performance engine `luffy.for`. It is the
 program the GPU rewrite is validated against; the companion document
 `architecture_gpu.md` describes the port.
 
+> The `reference/` tree is no longer in the working tree (removed in commit
+> `477dad7`). Restore it for reading with `git checkout 477dad7^ -- reference`.
+
 ## Its essential nature
 
 VOACAP is **scalar and sequential**. One circuit (one transmitter/receiver

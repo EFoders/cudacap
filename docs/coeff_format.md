@@ -5,6 +5,11 @@ The ionospheric coefficient data VOACAP depends on ships with voacapl as
 `reference/voacapl/voacapl/itshfbc/coeffs/`. The converters are the format
 specification; nothing here was reverse-engineered from binaries.
 
+> The `reference/` tree is no longer in the working tree (removed in commit
+> `477dad7`); restore it with `git checkout 477dad7^ -- reference`. The ASCII
+> coefficient files the engine reads at runtime are bundled in
+> `src/voacap_gpu/data/coeffs/`.
+
 | ASCII source | Converter | Binary product (oracle) | Consumed by |
 |---|---|---|---|
 | `coeff01.asc` … `coeff12.asc` | `coeffbin.f` | `coeffXX.bin` (sequential unformatted, 38,552 B) | ICEPAC/VOACAP/REC533 monthly load |

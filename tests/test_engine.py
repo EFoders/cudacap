@@ -4,15 +4,18 @@ The claims:
 
 * ``test_setup_chain_vs_oracle`` -- the setup chain (REDMAP -> GEOM -> SANG ->
   the per-hour GEOTIM/VIRTIM/TIMVAR/F2VAR/ESIND/IONSET/CURMUF chain), built
-  from a deck's RAW inputs (endpoint coordinates, month, SSN, the SYSTEM/FPROB
-  scalars), reproduces the captured LUFFY *entry* state field for field.  The
-  captured state came from the stock voacapl, so this is the composition test
-  the replay could not be: everything above CURMUF, run as one driver.
+  from a deck's RAW inputs (endpoint coordinates off the deck's CIRCUIT card,
+  month, SSN, the SYSTEM/FPROB scalars), reproduces the captured LUFFY *entry*
+  state field for field, on EVERY captured deck.  The captured state came
+  from the stock voacapl, so this is the composition test the replay could
+  not be: everything above CURMUF, run as one driver.
 
-* ``test_end_to_end_vs_oracle`` -- feeding those built circuits through the
-  CUDA LUFFY kernel reproduces the deck's captured /SON/ output.  Since LUFFY
-  is already validated bit-exact, any divergence here would be a setup-chain
-  bug; there is none beyond the libm floor.
+* ``test_end_to_end_vs_oracle`` -- feeding those built circuits through LUFFY
+  (``cpu``: the scalar reference; ``cuda``: the production kernel) in exactly
+  ``predict``'s configuration -- one FRESH circuit per hour sharing one REDMAP
+  -- reproduces every deck's captured /SON/ output: hop counts exact, each
+  numeric field within an ABSOLUTE bound (table below).  The ICEPAC deck is
+  in the set, so this is also the end-to-end check of the sporadic-E path.
 
 * ``test_offazim_from_bearing`` / ``test_bearing_gain_path_vs_oracle`` -- the
   antenna beam heading, against GEOM's path bearing, reproduces the captured
@@ -31,30 +34,112 @@ The claims:
 
 The geomagnetic pole is the reference program's runtime fallback (78.5N,
 -69.0), which is what the oracle capture used -- see ``engine`` module docstring.
+
+END-TO-END BOUNDS
+-----------------
+Measured worst |got - oracle| over the original 22 decks (the 21 in
+``golden/dumps/luffy`` + ``luffy_icepac/tanbel_m07_s160_icepac``; the 13 newer
+ICEPAC-mode decks in ``luffy_icepac`` are also run against these bounds, see
+tests/test_icepac_oracle.py, with ushrot_* an expected failure) x 24 hours x
+every requested frequency, fresh circuit per hour, captured antennas.  CPU and
+CUDA measured IDENTICAL (bit-for-bit, every deck; see test_cpu_backend.py).
+Each bound is ~5x the measured worst, rounded up to a clean number:
+
+    field   units      measured worst  bound   worst cell
+    dbw     dBW        1.663e-3        1e-2    sydstg_m01_s100_v30 h18 f4
+    sndb    dB-Hz      1.663e-3        1e-2    (same cell)
+    dbu     dB(uV/m)   1.663e-3        1e-2    (same cell)
+    dblos   dB         1.663e-3        1e-2    (same cell)
+    snpr    dB         1.663e-3        1e-2    (same cell)
+    reliab  fraction   3.403e-5        2e-4    fbahel_m07_s15_v30 h22 f1
+    angle   deg        2.527e-4        2e-3    latok_m01_s100_v20 h22 f2
+    delay   ms         5.264e-4        3e-3    lonakl_m01_s100_v30 h8 f6
+    vhigh   km         6.018e-2        0.4     lonakl_m01_s100_v30 h8 f6
+
+These replace the old "% bit-exact" floor as the pass criterion (that
+fraction is still printed): it measured how often the libm floor happens to
+round the same way, not how close the answer is -- lonakl_m07_s15_v30 is
+65.7% bit-exact with a worst error of a few thousandths of a dB.  The
+floored-ULP bar (``ULP_BAR``, the replay's 25,000) is kept: it holds on every
+deck (worst 8,704, lonakl_m01_s100_v30_long dbu).  The relative bar
+(``REL_BAR``) is dropped end-to-end: on a near-zero field it is ill-posed --
+the ICEPAC deck's snpr of -0.0054 dB is off by 1.5e-5 dB, which is 2.8e-3
+relative, passing the 3e-3 bar by 6% while being 100x inside the absolute
+bound.
+
+The bounds were measured on Windows (numpy/MSVC f32 libm on the host setup
+chain); the oracle is glibc gfortran.  See docs/f32_libm.md -- a different
+host libm moves the floor, not the bound's order of magnitude.
 """
+
+import functools
+import time
 
 import numpy as np
 import pytest
 
+from voacap_gpu import engine as _engine
 from voacap_gpu.engine import (POLE_DEFAULT, System, build_circuit,
                                cant_from_files, isotropic_cant, offazim,
                                predict, predict_circuits)
 from voacap_gpu.scalar.f32math import F32
+from voacap_gpu.scalar.redmap import redmap
 
 from tests.scalar.dumputil import ulp_diff_floored
 from tests.scalar.test_luffy_replay import DUMPS, _antennas, _rows
 
-# name -> (tx lat, tx lon, rx lat, rx lon, npsl), south/west negative.  From
-# tools/oracle/golden_decks/gen_matrix.py PATHS, one per regime.
-DECKS = {
-    "lonpar_m01_s100_v30": (51.50, -0.13, 48.85, 2.35, 0),      # short (343 km)
-    "latok_m01_s100_v30": (34.05, -118.24, 35.68, 139.77, 0),   # smooth (8809)
-    "lonakl_m01_s100_v30_long": (51.50, -0.13, -36.85, 174.76, 1),  # long
+# The ICEPAC oracle deck (URSI + FPROB 0.70, Es in all 24 hours; the CCIR twin
+# tanbel_m07_s160_v30 has ESMUF=0).  Captured isolated so the 21-deck replay
+# set is untouched; its CIRCUIT card is the CCIR twin's.
+ICEPAC_DUMPS = DUMPS.parent / "luffy_icepac"
+ICEPAC_DECK = "tanbel_m07_s160_icepac"
+ICEPAC_COORDS = (35.80, -5.90, 44.90, 20.50, 0)      # TANGIER -> BELGRADE
+
+# The deck sources the dumps were captured from (golden/p2p/matrix/decks).
+DECKDIR = DUMPS.parent.parent / "p2p" / "matrix" / "decks"
+
+# The ICEPAC-mode deck matrix (tools/oracle/icepac/gen_icepac_decks.py, all
+# URSI + FPROB 0.70) is captured into luffy_icepac too; its CIRCUIT cards are
+# in golden/p2p/icepac_decks.  ICEPAC_DECKS = every deck in luffy_icepac.
+ICEPAC_DECKDIR = DUMPS.parent.parent / "p2p" / "icepac_decks"
+ICEPAC_DECKS = sorted(p.name[:-7] for p in ICEPAC_DUMPS.glob("*_in.csv"))
+
+# Every captured LUFFY deck: the 21 replay decks plus the ICEPAC ones.
+ALL_DECKS = sorted(p.name[:-7] for p in DUMPS.glob("*_in.csv")) + ICEPAC_DECKS
+
+# Decks known to break the oracle bounds, with the diagnosed cause.  Kept in
+# ALL_DECKS (test_cpu_backend's CPU == CUDA identity still holds on them) but
+# xfail(strict) in the two oracle tests here, so a fix shows up as XPASS.
+_OUT_OF_BOUNDS = {
+    "ushrot_m01_s160_v30_ice": (
+        "near-meridional path (dlon 0.17 deg): GEOM's control-point longitude "
+        "is ACOS of an argument 7.7e-7 below 1, so a 1-ULP f32 difference "
+        "there is 4.7e-5 rad (clong01; clck01 1504 floored ULP) and reaches "
+        "angle as 6.5e-3 deg > 2e-3.  Not Es: LUFFY fed the captured entry "
+        "state is within bounds, and the CCIR/FPROB-0 twin also breaks angle"),
+}
+_ORACLE_DECKS = [
+    pytest.param(d, marks=pytest.mark.xfail(strict=True,
+                                            reason=_OUT_OF_BOUNDS[d]))
+    if d in _OUT_OF_BOUNDS else d for d in ALL_DECKS]
+
+# the replay's ULP bar (tests/scalar/test_luffy_replay.py); holds end-to-end
+# on every deck, worst 8,704 -- see END-TO-END BOUNDS
+ULP_BAR = 25000.0
+
+# Absolute end-to-end bounds per /SON/ field -- see END-TO-END BOUNDS above.
+SON_ABS_BOUND = {
+    "dbw": 1e-2, "sndb": 1e-2, "dbu": 1e-2, "dblos": 1e-2, "snpr": 1e-2,
+    "reliab": 2e-4, "angle": 2e-3, "delay": 3e-3, "vhigh": 0.4,
 }
 
-# the replay's own bars (tests/scalar/test_luffy_replay.py)
-ULP_BAR = 25000.0
-REL_BAR = 3.0e-3
+# Setup-chain bars, measured the same way over all 22 decks (fresh circuit
+# per hour): worst 172 floored ULP (lonakl_m01_s100_v30 delmuf01) and 2.28e-5
+# relative (tanbel delmuf01); ~5x each, rounded up.  The old 97% bit-exact
+# floor fails honestly on the two lonakl short-path decks (84.6% / 88.2%,
+# DELMUF/angle-of-MUF libm noise), so it is printed, not asserted.
+SETUP_ULP_BAR = 1000.0
+SETUP_REL_BAR = 1.5e-4
 
 _PER_AREA = ("clat", "clong", "glat", "rd", "gyz", "gmdip", "clck", "abiy",
              "f2m3", "hpf2", "zenang", "zenmax", "rat", "sigpat", "epspat",
@@ -65,14 +150,16 @@ _MUF_LAY = ("sigl", "sigu", "delmuf", "hpmuf", "htmuf", "fvmuf", "yfot",
 # numeric /SON/ columns compared end-to-end (nhp is discrete, checked exactly)
 _SON_NUM = ("angle", "dblos", "dbu", "delay", "dbw", "reliab", "sndb", "snpr",
             "vhigh")
+assert set(SON_ABS_BOUND) == set(_SON_NUM)
 
 
 def _system_from_row(v):
     """The SYSTEM/FPROB scalars off a captured entry-state row."""
     return System(
         required_snr=float(v["rsn"]), min_takeoff_deg=float(v["amind"]),
-        required_reliability=int(v["lufp"]), max_delay_ms=float(v["pmp"]),
-        max_spread_db=float(v["dmp"]), man_made_noise=float(v["noise"]),
+        required_reliability=int(v["lufp"]),
+        multipath_power_db=float(v["pmp"]),
+        multipath_delay_ms=float(v["dmp"]), man_made_noise=float(v["noise"]),
         fprob=(float(v["psc01"]), float(v["psc02"]), float(v["psc03"]),
                float(v["psc04"])))
 
@@ -84,31 +171,122 @@ def _deck_method(v):
     return int(v["method"])
 
 
-@pytest.mark.skipif(not DUMPS.glob("*_in.csv"),
-                    reason="oracle dumps missing")
-@pytest.mark.parametrize("deck", DECKS)
+def _dumps(deck):
+    return ICEPAC_DUMPS if deck in ICEPAC_DECKS else DUMPS
+
+
+def _coeff(deck):
+    return "URSI" if (deck in ICEPAC_DECKS or "_ursi" in deck) else "CCIR"
+
+
+def _circuit_card(deck):
+    """(tx lat, tx lon, rx lat, rx lon, npsl) off the deck's CIRCUIT card.
+
+    The card is ``CIRCUIT  51.50N  0.13W  36.85S  174.76E  L  1``: four
+    hemisphere-suffixed coordinates (south/west negative) and the S/L path
+    flag, where ``L`` is the long great circle, NPSL=1.  The ICEPAC deck was
+    generated from its CCIR twin's card; the ICEPAC matrix decks carry their
+    own, in ICEPAC_DECKDIR.
+    """
+    src = ICEPAC_DECKDIR / f"{deck}.dat"
+    if not src.exists():
+        src = DECKDIR / f"{deck.replace('_icepac', '_v30')}.dat"
+    name = src.stem
+    with open(src) as f:
+        for line in f:
+            if line.startswith("CIRCUIT"):
+                tok = line.split()
+                vals = [float(t[:-1]) * (-1.0 if t[-1] in "SW" else 1.0)
+                        for t in tok[1:5]]
+                assert tok[5] in ("S", "L"), line
+                return (*vals, 1 if tok[5] == "L" else 0)
+    raise LookupError(f"{name}.dat has no CIRCUIT card")
+
+
+def _require_cuda():
+    """Skip unless cupy imports AND sees a device.
+
+    ``importorskip("cupy")`` alone is not enough: on a CPU-only CI runner the
+    CuPy wheel installs fine and ``predict`` then dies with
+    ``cudaErrorNoDevice``.  Same check as ``predict(backend='auto')``.
+    """
+    if not _engine._cuda_usable():
+        pytest.skip("no usable CUDA device")
+
+
+def _need(backend):
+    """Skip a ``backend``-parametrised case whose backend is unavailable."""
+    if backend == "cuda":
+        _require_cuda()
+
+
+def _deck_inputs(deck):
+    """Raw inputs for one deck: (coords, system, method, coeff, freqs, ins)."""
+    ins = _rows(_dumps(deck) / f"{deck}_in.csv")
+    v0 = ins[0]
+    nf = sum(1 for i in range(1, 12) if v0[f"frel{i:02d}"] > 0)
+    freqs = [F32(v0[f"frel{i:02d}"]) for i in range(1, nf + 1)]
+    return (_circuit_card(deck), _system_from_row(v0), _deck_method(v0),
+            _coeff(deck), freqs, ins)
+
+
+@functools.lru_cache(maxsize=None)
+def run_deck(deck, backend):
+    """One deck through LUFFY in ``predict``'s configuration; cached.
+
+    A FRESH circuit per hour (no /SON/ carry-over), all sharing one REDMAP
+    and the captured /cantenna/ -- exactly what ``predict`` hands
+    ``predict_circuits``.  Returns ``(son, status, seconds)``: ``son`` maps
+    each ``_SON_NUM`` field and ``nhp`` to an ``(hours, nf)`` array in
+    /SON/ slot order, ``seconds`` is the LUFFY wall time.  Cached so the
+    CPU-vs-CUDA identity test reuses these runs rather than repeating them.
+    """
+    coords, system, method, coeff, freqs, ins = _deck_inputs(deck)
+    cant = _antennas(_rows(_dumps(deck) / f"{deck}_ant.csv"))
+    v0 = ins[0]
+    st = redmap(_engine._COEFFS_DIR, coeff, int(v0["month"]), F32(v0["ssn"]))
+    circuits, ipflags = [], []
+    for v in ins:
+        c, ip = build_circuit(coords[:2], coords[2:4], int(v["month"]),
+                              F32(v["ssn"]), int(v["it"]), freqs,
+                              method=method, system=system, cant=cant,
+                              coeff=coeff, pole=POLE_DEFAULT, npsl=coords[4],
+                              iono=st)
+        circuits.append(c)
+        ipflags.append(ip)
+    t0 = time.perf_counter()
+    _, status = predict_circuits(circuits, ipflags, backend=backend)
+    secs = time.perf_counter() - t0
+    nf = len(freqs)
+    son = {nm: np.array([np.asarray(getattr(c.son, nm)[1:nf + 1], np.float32)
+                         for c in circuits]) for nm in _SON_NUM}
+    son["nhp"] = np.array([[int(c.son.nhp[j]) for j in range(1, nf + 1)]
+                           for c in circuits], np.int32)
+    son["it"] = np.array([int(c.time.it) for c in circuits], np.int32)
+    return son, np.asarray(status, np.int32), secs
+
+
+_BACKENDS = ("cpu", "cuda")
+
+
+@pytest.mark.skipif(not ALL_DECKS, reason="oracle dumps missing")
+@pytest.mark.parametrize("deck", _ORACLE_DECKS)
 def test_setup_chain_vs_oracle(deck):
     """Built geometry + per-area ionosphere vs the captured entry state."""
-    coords = DECKS[deck]
-    ins = _rows(DUMPS / f"{deck}_in.csv")
+    coords, system, method, coeff, _freqs, ins = _deck_inputs(deck)
     v0 = ins[0]
-    tx = (coords[0], coords[1])
-    rx = (coords[2], coords[3])
-    npsl = coords[4]
-    system = _system_from_row(v0)
-    method = _deck_method(v0)
-    coeff = "URSI" if "_ursi" in deck else "CCIR"
+    tx, rx, npsl = coords[:2], coords[2:4], coords[4]
+    st = redmap(_engine._COEFFS_DIR, coeff, int(v0["month"]), F32(v0["ssn"]))
 
-    circ = None
     total = exact = 0
     worst = (0.0, None)
-    for v in ins:                              # all 24 hours, circuit reused
+    for v in ins:                    # all 24 hours, fresh circuit as predict
         circ, _ip = build_circuit(tx, rx, int(v["month"]), F32(v["ssn"]),
                                   int(v["it"]), [F32(v[f"frel{i:02d}"])
                                                  for i in range(1, 12)
                                                  if v[f"frel{i:02d}"] > 0],
                                   method=method, system=system, coeff=coeff,
-                                  pole=POLE_DEFAULT, npsl=npsl, circ=circ)
+                                  pole=POLE_DEFAULT, npsl=npsl, iono=st)
         lay, muf = circ.layers, circ.muf
         checks = {"gcd": circ.gcd, "gcdkm": circ.gcdkm,
                   "gmtr": circ.time.gmtr, "rlongd": circ.rlongd}
@@ -135,80 +313,66 @@ def test_setup_chain_vs_oracle(deck):
             exact += d == 0.0
             if d > worst[0]:
                 worst = (d, f"{name} h{it}: {g!r} vs {e!r}")
-            assert d <= ULP_BAR, f"{deck} {name} h{it}: {g!r} vs {e!r}"
+            assert d <= SETUP_ULP_BAR, f"{deck} {name} h{it}: {g!r} vs {e!r}"
             if d and float(e) != 0.0:
                 rel = abs(float(g) - float(e)) / abs(float(e))
-                assert rel <= REL_BAR, f"{deck} {name} h{it}: {rel:.2e} rel"
-    frac = exact / total
+                assert rel <= SETUP_REL_BAR, (
+                    f"{deck} {name} h{it}: {rel:.2e} rel")
     print(f"\n{deck}: setup-chain {exact}/{total} bit-exact "
-          f"({100 * frac:.2f}%), worst {worst[0]:.0f} ULP at {worst[1]}")
-    assert frac >= 0.97, f"{deck}: only {frac:.3f} bit-exact"
+          f"({100 * exact / total:.2f}%), worst {worst[0]:.0f} ULP at "
+          f"{worst[1]}")
 
 
-@pytest.mark.skipif(not DUMPS.glob("*_in.csv"),
-                    reason="oracle dumps missing")
-@pytest.mark.parametrize("deck", DECKS)
-def test_end_to_end_vs_oracle(deck):
-    """Built circuits through the GPU kernel vs the captured /SON/ output."""
-    cp = pytest.importorskip("cupy")
-    try:
-        cp.cuda.runtime.getDeviceCount()
-    except Exception:                                       # pragma: no cover
-        pytest.skip("no CUDA device")
+@pytest.mark.skipif(not ALL_DECKS, reason="oracle dumps missing")
+@pytest.mark.parametrize("backend", _BACKENDS)
+@pytest.mark.parametrize("deck", _ORACLE_DECKS)
+def test_end_to_end_vs_oracle(deck, backend):
+    """Raw inputs -> setup chain -> LUFFY vs the captured /SON/ output."""
+    if backend == "cuda":
+        _require_cuda()
+    outs = _rows(_dumps(deck) / f"{deck}_out.csv")
+    son, status, secs = run_deck(deck, backend)
+    assert status.tolist() == [0] * len(outs), f"{deck}: status {status}"
+    H, nf = son["nhp"].shape
+    assert H == len(outs)
 
-    coords = DECKS[deck]
-    ins = _rows(DUMPS / f"{deck}_in.csv")
-    outs = _rows(DUMPS / f"{deck}_out.csv")
-    ants = _rows(DUMPS / f"{deck}_ant.csv")
-    cant = _antennas(ants)                    # the captured /cantenna/ + power
-    v0 = ins[0]
-    tx = (coords[0], coords[1])
-    rx = (coords[2], coords[3])
-    system = _system_from_row(v0)
-    method = _deck_method(v0)
-    coeff = "URSI" if "_ursi" in deck else "CCIR"
-    nf = sum(1 for i in range(1, 12) if v0[f"frel{i:02d}"] > 0)
-    freqs = [F32(v0[f"frel{i:02d}"]) for i in range(1, nf + 1)]
-
-    circ = None
     total = exact = 0
-    worst = (0.0, None)
-    for v, vout in zip(ins, outs):            # reuse circuit for carry-over
-        circ, ip = build_circuit(tx, rx, int(v["month"]), F32(v["ssn"]),
-                                 int(v["it"]), freqs, method=method,
-                                 system=system, cant=cant, coeff=coeff,
-                                 pole=POLE_DEFAULT, npsl=coords[4], circ=circ)
-        predict_circuits([circ], [ip])
-        it = circ.time.it
-        son = circ.son
-        for j in range(1, nf + 1):
-            assert int(son.nhp[j]) == int(vout[f"nhp{j:02d}"]), (
-                f"{deck} nhp{j} h{it}: hop count differs")
+    worst = {nm: (0.0, None) for nm in _SON_NUM}
+    worst_ulp = (0.0, None)
+    for h, vout in enumerate(outs):
+        it = int(son["it"][h])
+        for j in range(nf):
+            assert int(son["nhp"][h, j]) == int(vout[f"nhp{j + 1:02d}"]), (
+                f"{deck} nhp{j + 1} h{it}: hop count differs")
             for nm in _SON_NUM:
-                g = F32(getattr(son, nm)[j])
-                e = F32(vout[f"{nm}{j:02d}"])
+                g = F32(son[nm][h, j])
+                e = F32(vout[f"{nm}{j + 1:02d}"])
+                where = f"{nm}{j + 1} h{it}: {g!r} vs {e!r}"
                 d = ulp_diff_floored(g, e)
                 total += 1
                 exact += d == 0.0
-                if d > worst[0]:
-                    worst = (d, f"{nm}{j} h{it}: {g!r} vs {e!r}")
-                assert d <= ULP_BAR, f"{deck} {nm}{j} h{it}: {g!r} vs {e!r}"
-                if d and float(e) != 0.0:
-                    rel = abs(float(g) - float(e)) / abs(float(e))
-                    assert rel <= REL_BAR, f"{deck} {nm}{j} h{it}: {rel:.2e}"
-    frac = exact / total
-    print(f"\n{deck}: end-to-end {exact}/{total} bit-exact "
-          f"({100 * frac:.2f}%), worst {worst[0]:.0f} ULP at {worst[1]}")
-    assert frac >= 0.90, f"{deck}: only {frac:.3f} bit-exact"
+                if d > worst_ulp[0]:
+                    worst_ulp = (d, where)
+                assert d <= ULP_BAR, f"{deck} {where} ({d:.0f} ULP)"
+                a = abs(float(g) - float(e))
+                if a > worst[nm][0]:
+                    worst[nm] = (a, where)
+                assert a <= SON_ABS_BOUND[nm], (
+                    f"{deck} {where}: |d| {a:.3e} > {SON_ABS_BOUND[nm]:g}")
+    print(f"\n{deck} [{backend}]: end-to-end {exact}/{total} bit-exact "
+          f"({100 * exact / total:.2f}%), worst {worst_ulp[0]:.0f} ULP; "
+          f"LUFFY {1000 * secs / H:.1f} ms/circuit-hour; worst |d| "
+          + ", ".join(f"{nm} {worst[nm][0]:.1e}" for nm in _SON_NUM))
 
 
-def test_predict_smoke():
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_predict_smoke(backend):
     """predict() from pure Python inputs: shape and monotonicities."""
-    pytest.importorskip("cupy")
+    _need(backend)
     freqs = [5.0, 7.0, 10.0, 14.0, 18.0, 21.0, 28.0]
     hours = list(range(1, 25))
     r = predict((40.0, -105.0), (48.85, 2.35), freqs=freqs, month=6, ssn=120,
-                hours=hours, system=System(power_kw=100.0))
+                hours=hours, system=System(power_kw=100.0), backend=backend)
 
     assert r.snr.shape == (24, len(freqs))
     assert r.muf.shape == (24,)
@@ -258,7 +422,7 @@ def test_unsupported_raises(tmp_path):
 # OFFAZIM from antenna bearing
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not DUMPS.glob("*_in.csv"), reason="oracle dumps missing")
+@pytest.mark.skipif(not any(DUMPS.glob("*_in.csv")), reason="oracle dumps missing")
 def test_offazim_from_bearing():
     """Beam heading + GEOM path bearing reproduce the captured OFFAZIM.
 
@@ -287,8 +451,9 @@ def test_offazim_from_bearing():
     assert offazim(10.0, 350.0) == pytest.approx(20.0, abs=1e-4)   # wrap
 
 
-@pytest.mark.skipif(not DUMPS.glob("*_in.csv"), reason="oracle dumps missing")
-def test_bearing_gain_path_vs_oracle():
+@pytest.mark.skipif(not any(DUMPS.glob("*_in.csv")), reason="oracle dumps missing")
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_bearing_gain_path_vs_oracle(backend):
     """The bearing -> OFFAZIM -> gain path, driven end-to-end on a real deck.
 
     lonpar's sample.00 is a type-0 antenna: ANTCALC *synthesises* its gain
@@ -299,7 +464,7 @@ def test_bearing_gain_path_vs_oracle():
     that our OFFAZIM matches ANTCALC's (to the bearing floor) and that the gain
     LOOKUP consumes the captured table correctly.
     """
-    pytest.importorskip("cupy")
+    _need(backend)
     deck = "lonpar_m01_s100_v30"
     ins = _rows(DUMPS / f"{deck}_in.csv")
     outs = _rows(DUMPS / f"{deck}_out.csv")
@@ -319,7 +484,7 @@ def test_bearing_gain_path_vs_oracle():
                                  pole=POLE_DEFAULT, circ=circ)
         # our OFFAZIM (from the bearing) lands on the captured value
         assert abs(float(circ.cant.offazim[1]) - 58.1) < 0.02
-        predict_circuits([circ], [ip])
+        predict_circuits([circ], [ip], backend=backend)
         son = circ.son
         for j in range(1, nf + 1):
             for nm in _SON_NUM:
@@ -338,10 +503,12 @@ def test_bearing_gain_path_vs_oracle():
 # The VOACAP / ICEPAC model toggle
 # ---------------------------------------------------------------------------
 
-def test_model_voacap_matches_default():
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_model_voacap_matches_default(backend):
     """model='voacap' == CCIR + FPROB (1,1,1,0), i.e. the validated config."""
-    pytest.importorskip("cupy")
-    kw = dict(freqs=[7.0, 14.0, 21.0], month=6, ssn=120, hours=[6, 12, 18])
+    _need(backend)
+    kw = dict(backend=backend, freqs=[7.0, 14.0, 21.0], month=6, ssn=120,
+              hours=[6, 12, 18])
     a = predict((40.0, -105.0), (48.85, 2.35), model="voacap", **kw)
     b = predict((40.0, -105.0), (48.85, 2.35), coeff="CCIR",
                 system=System(fprob=(1.0, 1.0, 1.0, 0.0)), **kw)
@@ -350,10 +517,12 @@ def test_model_voacap_matches_default():
     assert np.allclose(a.snr, b.snr, equal_nan=True)
 
 
-def test_model_icepac_matches_ursi_fprob():
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_model_icepac_matches_ursi_fprob(backend):
     """model='icepac' == URSI + FPROB (1,1,1,0.70), the documented config."""
-    pytest.importorskip("cupy")
-    kw = dict(freqs=[7.0, 14.0, 21.0], month=6, ssn=120, hours=[6, 12, 18])
+    _need(backend)
+    kw = dict(backend=backend, freqs=[7.0, 14.0, 21.0], month=6, ssn=120,
+              hours=[6, 12, 18])
     a = predict((40.0, -105.0), (48.85, 2.35), model="icepac", **kw)
     b = predict((40.0, -105.0), (48.85, 2.35), coeff="URSI",
                 system=System(fprob=(1.0, 1.0, 1.0, 0.70)), **kw)
@@ -373,9 +542,9 @@ def test_model_unknown_refuses():
 # Captured isolated so the 21-deck replay set is untouched.
 # ---------------------------------------------------------------------------
 
-ICEPAC_DUMPS = DUMPS.parent / "luffy_icepac"
-ICEPAC_DECK = "tanbel_m07_s160_icepac"
-ICEPAC_COORDS = (35.80, -5.90, 44.90, 20.50, 0)      # TANGIER -> BELGRADE
+# (ICEPAC_DUMPS / ICEPAC_DECK / ICEPAC_COORDS are defined at the top.)  Its
+# end-to-end check is test_end_to_end_vs_oracle[tanbel_m07_s160_icepac-*],
+# which replaced the carry-over-circuit test with its 87% bit-exact floor.
 
 
 @pytest.mark.skipif(not (ICEPAC_DUMPS / f"{ICEPAC_DECK}_in.csv").exists(),
@@ -424,80 +593,15 @@ def test_icepac_setup_chain_vs_oracle():
     assert frac >= 0.97, f"icepac setup-chain only {frac:.3f}"
 
 
-@pytest.mark.skipif(not (ICEPAC_DUMPS / f"{ICEPAC_DECK}_out.csv").exists(),
-                    reason="ICEPAC oracle dump missing")
-def test_icepac_end_to_end_vs_oracle():
-    """Built ICEPAC circuits through the GPU kernel vs the captured /SON/.
-
-    This is the FIRST end-to-end validation of the sporadic-E path: every
-    deck in the 21-deck replay set is CCIR with ESMUF=0, so ESMOD's Es modes
-    reaching /SON/ through RELBIL were never checked against the oracle until
-    this deck (Es in all 24 hours).
-    """
-    cp = pytest.importorskip("cupy")
-    try:
-        cp.cuda.runtime.getDeviceCount()
-    except Exception:                                       # pragma: no cover
-        pytest.skip("no CUDA device")
-
-    ins = _rows(ICEPAC_DUMPS / f"{ICEPAC_DECK}_in.csv")
-    outs = _rows(ICEPAC_DUMPS / f"{ICEPAC_DECK}_out.csv")
-    ants = _rows(ICEPAC_DUMPS / f"{ICEPAC_DECK}_ant.csv")
-    cant = _antennas(ants)
-    tx, rx = ICEPAC_COORDS[:2], ICEPAC_COORDS[2:4]
-    v0 = ins[0]
-    nf = sum(1 for i in range(1, 12) if v0[f"frel{i:02d}"] > 0)
-    freqs = [F32(v0[f"frel{i:02d}"]) for i in range(1, nf + 1)]
-
-    circ = None
-    total = exact = es_modes = 0
-    worst = (0.0, None)
-    for v, vout in zip(ins, outs):
-        circ, ip = build_circuit(tx, rx, int(v["month"]), F32(v["ssn"]),
-                                 int(v["it"]), freqs, method=30,
-                                 system=_system_from_row(v), cant=cant,
-                                 coeff="URSI", pole=POLE_DEFAULT, npsl=0,
-                                 circ=circ)
-        predict_circuits([circ], [ip])
-        it, son = circ.time.it, circ.son
-        for j in range(1, nf + 1):
-            assert int(son.nhp[j]) == int(vout[f"nhp{j:02d}"]), (
-                f"icepac nhp{j} h{it}: hop count differs")
-            es_modes += son.mdl[j] == "Es" if hasattr(son, "mdl") else 0
-            for nm in _SON_NUM:
-                g, e = F32(getattr(son, nm)[j]), F32(vout[f"{nm}{j:02d}"])
-                d = ulp_diff_floored(g, e)
-                total += 1
-                exact += d == 0.0
-                if d > worst[0]:
-                    worst = (d, f"{nm}{j} h{it}: {g!r} vs {e!r}")
-                assert d <= ULP_BAR, f"icepac {nm}{j} h{it}: {g!r} vs {e!r}"
-                if d and float(e) != 0.0:
-                    rel = abs(float(g) - float(e)) / abs(float(e))
-                    assert rel <= REL_BAR, f"icepac {nm}{j} h{it}: {rel:.2e}"
-    frac = exact / total
-    print(f"\nICEPAC end-to-end {exact}/{total} bit-exact ({100*frac:.2f}%), "
-          f"worst {worst[0]:.0f} ULP at {worst[1]}")
-    # Its own floor, BELOW the CCIR decks' 0.90.  Measured 0.896; the residual
-    # is the [[f32-libm-noise]] floor spread over MORE fields than a no-Es deck
-    # -- worst 4.9e-4 absolute, broad across delay/angle (the documented
-    # ATAN/ACOS-cancellation geometry fields) and the Es power/SNR columns, NOT
-    # concentrated or systematic.  The load-bearing check is above: the hop
-    # count NHP is exact in every cell, so no Es mode is mis-selected; only the
-    # numbers attached to it carry the libm floor.  Do not raise this to 0.90 --
-    # that would be sitting a bar the no-Es decks happen to clear on a deck the
-    # extra Es transcendentals legitimately do not.
-    assert frac >= 0.87, f"icepac end-to-end only {frac:.3f}"
-
-
 # ---------------------------------------------------------------------------
 # The Prop-SL parameter surface
 # ---------------------------------------------------------------------------
 
-def test_gain_offset_shifts_signal():
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_gain_offset_shifts_signal(backend):
     """tx_gos + rx_gos add straight onto the received signal power, in dB."""
-    pytest.importorskip("cupy")
-    kw = dict(freqs=[14.0], month=6, ssn=120, hours=[12])
+    _need(backend)
+    kw = dict(backend=backend, freqs=[14.0], month=6, ssn=120, hours=[12])
     base = predict((40.0, -105.0), (48.85, 2.35), **kw)
     off = predict((40.0, -105.0), (48.85, 2.35),
                   system=System(tx_gos=8.0, rx_gos=4.0), **kw)
@@ -505,10 +609,11 @@ def test_gain_offset_shifts_signal():
     assert d == pytest.approx(12.0, abs=1e-2), f"gain offset gave {d} dB"
 
 
-def test_advisory_params_do_not_change_results():
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_advisory_params_do_not_change_results(backend):
     """bandwidth / modulation are advisory: carried, but inert to the answer."""
-    pytest.importorskip("cupy")
-    kw = dict(freqs=[7.0, 14.0], month=6, ssn=120, hours=[12])
+    _need(backend)
+    kw = dict(backend=backend, freqs=[7.0, 14.0], month=6, ssn=120, hours=[12])
     a = predict((40.0, -105.0), (48.85, 2.35), **kw)
     b = predict((40.0, -105.0), (48.85, 2.35),
                 system=System(bandwidth=3000.0, modulation="USB"), **kw)
@@ -646,16 +751,17 @@ def test_antcalc_cant_t13_azimuth_dependence(tmp_path):
     assert not np.any(np.asarray(on_path.array[:, :, 2]))
 
 
-def test_predict_t13_smoke(tmp_path):
+@pytest.mark.parametrize("backend", _BACKENDS)
+def test_predict_t13_smoke(tmp_path, backend):
     """predict() end-to-end on the GPU with a directive type-13 TX pattern:
     rotating the beam 90 degrees off the path costs ~10 dB of signal."""
-    pytest.importorskip("cupy")
+    _need(backend)
     f = tmp_path / "dir.t13"
     f.write_text(_t13_text(lambda az, el: 10.0 * np.cos(np.radians(az)),
                            maxgain=0.0, eff=0.0))
     tx, rx = (40.0, -105.0), (50.0, 0.0)
     ztaz, _ = dazel0(*tx, *rx)
-    kw = dict(freqs=[14.0], month=7, ssn=100, hours=[12])
+    kw = dict(freqs=[14.0], month=7, ssn=100, hours=[12], backend=backend)
 
     on = predict(tx, rx, tx_antenna=str(f), tx_bearing=float(ztaz), **kw)
     off = predict(tx, rx, tx_antenna=str(f),

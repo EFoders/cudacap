@@ -17,8 +17,14 @@ from voacap_gpu.coeffs import (
 )
 from voacap_gpu.fortran_io import read_direct_records, read_sequential_records
 
+from tests.scalar.dumputil import COEFFS_DIR, REFERENCE_COEFFS_DIR
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-REF = ROOT / "reference" / "voacapl" / "voacapl" / "itshfbc" / "coeffs"
+# The monthly coeffNN.asc and fof2CCIR/URSI.asc sources are read from the
+# package's bundled copy (byte-identical to the vendored ones, pinned by
+# test_packaging.py).  fof2daly.asc is not bundled -- predict() never reads it
+# -- so the daily test needs the vendored tree and is marked ``oracle``.
+REF = COEFFS_DIR
 GOLD = ROOT / "golden" / "coeffs"
 
 pytestmark = pytest.mark.skipif(
@@ -66,8 +72,9 @@ def test_fof2_atlas_bit_exact(stem):
         assert fbytes(atlas[m]) == rec, f"{stem} month {m + 1} differs"
 
 
+@pytest.mark.oracle
 def test_fof2_daily_bit_exact():
-    daily = load_fof2_daily(REF / "fof2daly.asc")
+    daily = load_fof2_daily(REFERENCE_COEFFS_DIR / "fof2daly.asc")
     assert daily.shape == (9, 13, 76, 2) and daily.dtype == np.float32
     records = read_sequential_records(GOLD / "fof2daly.bin")
     assert len(records) == 9
